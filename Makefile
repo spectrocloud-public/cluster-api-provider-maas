@@ -221,8 +221,10 @@ version: ## Prints version of current make
 # LXD-initializer image (privileged DaemonSet)
 # --------------------------------------------------------------------
 INIT_IMAGE_NAME ?= "lxd-initializer"
-INIT_IMG_TAG    ?= $(IMG_TAG)          # reuse the same tag as controller
-INIT_DRI_IMG    ?= us-east1-docker.pkg.dev/spectro-images/dev/cluster-api/$(INIT_IMAGE_NAME)
+# INIT_IMG_TAG    ?= $(IMG_TAG)          # reuse the same tag as controller
+# INIT_DRI_IMG    ?= us-east1-docker.pkg.dev/spectro-images/dev/cluster-api/$(INIT_IMAGE_NAME)
+INIT_DRI_IMG     ?= $(REGISTRY)/$(INIT_IMAGE_NAME)
+INIT_IMG_TAG     ?= $(TAG)
 # Release image for LXD initializer (without tag)
 INIT_RELEASE_IMG ?= us-east1-docker.pkg.dev/spectro-images/dev/cluster-api/$(INIT_IMAGE_NAME)
 
