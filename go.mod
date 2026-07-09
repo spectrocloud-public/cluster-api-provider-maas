@@ -80,5 +80,6 @@ require (
 
 replace (
 	github.com/prometheus/common v0.32.1 => github.com/prometheus/common v0.26.0
+	github.com/spectrocloud/maas-client-go => github.com/spectrocloud-public/maas-client-go v0.1.7-beta1
 	sigs.k8s.io/structured-merge-diff/v6 => sigs.k8s.io/structured-merge-diff/v4 v4.4.3
 )
