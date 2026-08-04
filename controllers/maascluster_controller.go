@@ -30,7 +30,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"k8s.io/utils/ptr"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/controllers/remote"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
@@ -123,11 +124,12 @@ func (r *MaasClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Support FailureDomains
 	// In cloud providers this would likely look up which failure domains are supported and set the status appropriately.
 	// so kCP will distribute the CPs across multiple failure domains
-	failureDomains := make(clusterv1.FailureDomains)
+	failureDomains := []clusterv1.FailureDomain{}
 	for _, az := range maasCluster.Spec.FailureDomains {
-		failureDomains[az] = clusterv1.FailureDomainSpec{
-			ControlPlane: true,
-		}
+		failureDomains = append(failureDomains, clusterv1.FailureDomain{
+			Name:         az,
+			ControlPlane: ptr.To(true),
+		})
 	}
 	maasCluster.Status.FailureDomains = failureDomains
 

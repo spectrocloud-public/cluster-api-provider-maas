@@ -82,6 +82,14 @@ spec:
                                 description: DiskSize is the size of the VM disk in
                                   GB
                                 type: integer
+                              interfaceLinkModes:
+                                additionalProperties:
+                                  type: string
+                                description: |-
+                                  InterfaceLinkModes sets the MAAS link mode per interface (e.g. eth0, eth1, eth2).
+                                  Keys are interface names ("eth0", "eth1", ...); values: "auto", "dhcp", "static", "link_up".
+                                  When unset for an interface: eth0 defaults to "auto", others to "dhcp". Extensible for future interfaces.
+                                type: object
                               network:
                                 description: Network is the network to connect the
                                   VM to
@@ -104,6 +112,10 @@ spec:
                         description: MinMemoryInMB minimum memory in MB
                         minimum: 0
                         type: integer
+                      parent:
+                        description: Parent is the system ID of the parent host machine
+                          (for LXD VMs)
+                        type: string
                       providerID:
                         description: ProviderID will be the name in ProviderID format
                           (maas://<zone>/system_id)

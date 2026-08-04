@@ -18,7 +18,7 @@ package v1beta1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
 const (
@@ -104,7 +104,7 @@ type MaasClusterStatus struct {
 
 	// FailureDomains don't mean much in CAPMAAS since it's all local, but we can see how the rest of cluster API
 	// will use this if we populate it.
-	FailureDomains clusterv1.FailureDomains `json:"failureDomains,omitempty"`
+	FailureDomains []clusterv1.FailureDomain `json:"failureDomains,omitempty"`
 
 	// Conditions defines current service state of the MaasCluster.
 	// +optional
