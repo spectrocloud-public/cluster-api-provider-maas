@@ -32,9 +32,9 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
-	"sigs.k8s.io/cluster-api/controllers/remote"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	"sigs.k8s.io/cluster-api/util"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/cluster-api/util/predicates"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -70,7 +70,7 @@ type MaasClusterReconciler struct {
 	Scheme              *runtime.Scheme
 	Recorder            record.EventRecorder
 	GenericEventChannel chan event.GenericEvent
-	Tracker             *remote.ClusterCacheTracker
+	Tracker             clustercache.ClusterCache
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=maasclusters,verbs=get;list;watch;create;update;patch;delete
@@ -345,7 +345,7 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 
 	if err := dnsService.ReconcileDNS(); err != nil {
 		clusterScope.Error(err, "failed to reconcile load balancer")
-		conditions.MarkFalse(maasCluster, infrav1beta1.DNSReadyCondition, infrav1beta1.DNSFailedReason, clusterv1.ConditionSeverityError, err.Error())
+		conditions.MarkFalse(maasCluster, infrav1beta1.DNSReadyCondition, infrav1beta1.DNSFailedReason, clusterv1.ConditionSeverityError, "%s", err.Error())
 		return reconcile.Result{}, err
 	}
 
@@ -423,7 +423,7 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 		lxdService := lxd.NewService(clusterScope)
 		if err := lxdService.ReconcileLXD(); err != nil {
 			clusterScope.Error(err, "failed to reconcile LXD hosts")
-			conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError, err.Error())
+			conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError, "%s", err.Error())
 			return reconcile.Result{}, err
 		}
 		conditions.MarkTrue(maasCluster, infrav1beta1.LXDReadyCondition)

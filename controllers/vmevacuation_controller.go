@@ -288,7 +288,7 @@ func (r *VMEvacuationReconciler) findCPMachinesOnMaintenanceHosts(ctx context.Co
 
 		maasMachine := &infrav1beta1.MaasMachine{}
 		key := client.ObjectKey{
-			Namespace: machine.Spec.InfrastructureRef.Namespace,
+			Namespace: machine.Namespace,
 			Name:      machine.Spec.InfrastructureRef.Name,
 		}
 
@@ -404,19 +404,19 @@ func extractSystemIDFromProviderID(providerID string) string {
 
 // getKubeadmControlPlane retrieves the KubeadmControlPlane for the cluster
 func (r *VMEvacuationReconciler) getKubeadmControlPlane(ctx context.Context, cluster *clusterv1.Cluster) (*unstructured.Unstructured, error) {
-	if cluster.Spec.ControlPlaneRef == nil {
+	if cluster.Spec.ControlPlaneRef.Name == "" {
 		return nil, fmt.Errorf("cluster has no controlPlaneRef")
 	}
 
 	kcp := &unstructured.Unstructured{}
 	kcp.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "controlplane.cluster.x-k8s.io",
-		Version: "v1beta1",
+		Version: "v1beta2",
 		Kind:    "KubeadmControlPlane",
 	})
 
 	key := client.ObjectKey{
-		Namespace: cluster.Spec.ControlPlaneRef.Namespace,
+		Namespace: cluster.Namespace,
 		Name:      cluster.Spec.ControlPlaneRef.Name,
 	}
 

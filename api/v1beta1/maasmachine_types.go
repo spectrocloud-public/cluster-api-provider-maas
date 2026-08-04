@@ -192,11 +192,11 @@ type MaasMachine struct {
 	Status MaasMachineStatus `json:"status,omitempty"`
 }
 
-func (c *MaasMachine) GetConditions() clusterv1.Conditions {
+func (c *MaasMachine) GetV1Beta1Conditions() clusterv1.Conditions {
 	return c.Status.Conditions
 }
 
-func (c *MaasMachine) SetConditions(conditions clusterv1.Conditions) {
+func (c *MaasMachine) SetV1Beta1Conditions(conditions clusterv1.Conditions) {
 	c.Status.Conditions = conditions
 }
 

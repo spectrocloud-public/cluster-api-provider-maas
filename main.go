@@ -26,7 +26,7 @@ import (
 	"k8s.io/klog/v2/textlogger"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
-	"sigs.k8s.io/cluster-api/controllers/remote"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 
 	"github.com/spectrocloud/cluster-api-provider-maas/controllers"
 
@@ -139,26 +139,14 @@ func main() {
 	}
 
 	if webhookPort == 0 {
-		// Set up a ClusterCacheTracker and ClusterCacheReconciler to provide to controllers
-		// requiring a connection to a remote cluster
-		log := ctrl.Log.WithName("remote").WithName("ClusterCacheTracker")
-		tracker, err := remote.NewClusterCacheTracker(
-			mgr,
-			remote.ClusterCacheTrackerOptions{
-				Log:     &log,
-				Indexes: []remote.Index{remote.NodeProviderIDIndex},
-			},
-		)
+		// Set up a ClusterCache to provide cached clients/REST configs for workload clusters.
+		// In v1.13 (v1beta2), ClusterCacheTracker + ClusterCacheReconciler were unified into
+		// clustercache.SetupWithManager, which returns a ClusterCache interface directly.
+		clusterCache, err := clustercache.SetupWithManager(ctx, mgr, clustercache.Options{
+			SecretClient: mgr.GetClient(),
+		}, concurrency(1))
 		if err != nil {
-			setupLog.Error(err, "unable to create cluster cache tracker")
-			os.Exit(1)
-		}
-		if err := (&remote.ClusterCacheReconciler{
-			Client: mgr.GetClient(),
-			//Log:     ctrl.Log.WithName("remote").WithName("ClusterCacheReconciler"),
-			Tracker: tracker,
-		}).SetupWithManager(ctx, mgr, concurrency(1)); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "ClusterCacheReconciler")
+			setupLog.Error(err, "unable to create cluster cache")
 			os.Exit(1)
 		}
 
@@ -166,7 +154,7 @@ func main() {
 			Client:   mgr.GetClient(),
 			Log:      ctrl.Log.WithName("controllers").WithName("MaasMachine"),
 			Recorder: mgr.GetEventRecorderFor("maasmachine-controller"),
-			Tracker:  tracker,
+			Tracker:  clusterCache,
 		}).SetupWithManager(ctx, mgr, concurrency(machineConcurrency)); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "MaasMachine")
 			os.Exit(1)
@@ -177,7 +165,7 @@ func main() {
 			Log:      ctrl.Log.WithName("controllers").WithName("MaasCluster"),
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("maascluster-controller"),
-			Tracker:  tracker,
+			Tracker:  clusterCache,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "MaasCluster")
 			os.Exit(1)

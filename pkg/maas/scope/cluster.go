@@ -33,10 +33,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
-	"sigs.k8s.io/cluster-api/controllers/remote"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	"sigs.k8s.io/cluster-api/util"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -53,7 +54,7 @@ type ClusterScopeParams struct {
 	Cluster             *clusterv1.Cluster
 	MaasCluster         *infrav1beta1.MaasCluster
 	ControllerName      string
-	Tracker             *remote.ClusterCacheTracker
+	Tracker             clustercache.ClusterCache
 	ClusterEventChannel chan event.GenericEvent
 }
 
@@ -66,7 +67,7 @@ type ClusterScope struct {
 	Cluster             *clusterv1.Cluster
 	MaasCluster         *infrav1beta1.MaasCluster
 	controllerName      string
-	tracker             *remote.ClusterCacheTracker
+	tracker             clustercache.ClusterCache
 	clusterEventChannel chan event.GenericEvent
 }
 
@@ -111,10 +112,10 @@ func (s *ClusterScope) PatchObject() error {
 	return s.patchHelper.Patch(
 		context.TODO(),
 		s.MaasCluster,
-		patch.WithOwnedConditions{Conditions: []clusterv1.ConditionType{
-			clusterv1.ReadyCondition,
-			infrav1beta1.DNSReadyCondition,
-			infrav1beta1.APIServerAvailableCondition,
+		patch.WithOwnedConditions{Conditions: []string{
+			string(clusterv1.ReadyCondition),
+			string(infrav1beta1.DNSReadyCondition),
+			string(infrav1beta1.APIServerAvailableCondition),
 		}},
 	)
 }
@@ -130,8 +131,8 @@ func (s *ClusterScope) APIServerPort() int {
 		return s.MaasCluster.Spec.ControlPlaneEndpoint.Port
 	}
 
-	if s.Cluster.Spec.ClusterNetwork != nil && s.Cluster.Spec.ClusterNetwork.APIServerPort != nil {
-		return int(*s.Cluster.Spec.ClusterNetwork.APIServerPort)
+	if s.Cluster.Spec.ClusterNetwork.APIServerPort != 0 {
+		return int(s.Cluster.Spec.ClusterNetwork.APIServerPort)
 	}
 	return 6443
 }
@@ -308,9 +309,9 @@ var (
 )
 
 func (s *ClusterScope) ReconcileMaasClusterWhenAPIServerIsOnline() {
-	if s.Cluster.Status.ControlPlaneReady {
+	if ptr.Deref(s.Cluster.Status.Initialization.ControlPlaneInitialized, false) {
 		s.Info("skipping reconcile when API server is online",
-			"reason", "ControlPlaneReady")
+			"reason", "ControlPlaneInitialized")
 		return
 	} else if !s.Cluster.DeletionTimestamp.IsZero() {
 		s.Info("skipping reconcile when API server is online",

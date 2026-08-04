@@ -146,11 +146,11 @@ type MaasCluster struct {
 	Status MaasClusterStatus `json:"status,omitempty"`
 }
 
-func (in *MaasCluster) GetConditions() clusterv1.Conditions {
+func (in *MaasCluster) GetV1Beta1Conditions() clusterv1.Conditions {
 	return in.Status.Conditions
 }
 
-func (in *MaasCluster) SetConditions(conditions clusterv1.Conditions) {
+func (in *MaasCluster) SetV1Beta1Conditions(conditions clusterv1.Conditions) {
 	in.Status.Conditions = conditions
 }
 

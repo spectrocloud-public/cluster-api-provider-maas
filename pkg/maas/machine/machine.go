@@ -22,7 +22,7 @@ import (
 	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/lxd"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 )
 
 // Service manages the MaaS machine
@@ -145,8 +145,9 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 
 	failureDomain := mm.Spec.FailureDomain
 	if failureDomain == nil {
-		if s.scope.Machine.Spec.FailureDomain != nil && *s.scope.Machine.Spec.FailureDomain != "" {
-			failureDomain = s.scope.Machine.Spec.FailureDomain
+		if s.scope.Machine.Spec.FailureDomain != "" {
+			fd := s.scope.Machine.Spec.FailureDomain
+			failureDomain = &fd
 		}
 	}
 
@@ -338,8 +339,8 @@ func (s *Service) createVMViaMAAS(ctx context.Context, userDataB64 string) (*inf
 		if fallbackZone == "" {
 			if mm.Spec.FailureDomain != nil && *mm.Spec.FailureDomain != "" {
 				fallbackZone = *mm.Spec.FailureDomain
-			} else if s.scope.Machine.Spec.FailureDomain != nil && *s.scope.Machine.Spec.FailureDomain != "" {
-				fallbackZone = *s.scope.Machine.Spec.FailureDomain
+			} else if s.scope.Machine.Spec.FailureDomain != "" {
+				fallbackZone = s.scope.Machine.Spec.FailureDomain
 			}
 		}
 		s.scope.SetSystemID(deployingM.SystemID())
@@ -399,8 +400,8 @@ func (s *Service) PrepareLXDVM(ctx context.Context) (*infrav1beta1.Machine, erro
 	var zone string
 	if mm.Spec.FailureDomain != nil && *mm.Spec.FailureDomain != "" {
 		zone = *mm.Spec.FailureDomain
-	} else if s.scope.Machine.Spec.FailureDomain != nil && *s.scope.Machine.Spec.FailureDomain != "" {
-		zone = *s.scope.Machine.Spec.FailureDomain
+	} else if s.scope.Machine.Spec.FailureDomain != "" {
+		zone = s.scope.Machine.Spec.FailureDomain
 	}
 
 	var resourcePool string
