@@ -155,8 +155,19 @@ func main() {
 		// Set up a ClusterCache to provide cached clients/REST configs for workload clusters.
 		// In v1.13 (v1beta2), ClusterCacheTracker + ClusterCacheReconciler were unified into
 		// clustercache.SetupWithManager, which returns a ClusterCache interface directly.
+		//
+		// SecretClient uses GetAPIReader() (uncached direct-to-apiserver reader). The alternative,
+		// mgr.GetClient(), caches ALL secrets across ALL namespaces — a leak the clustercache docs
+		// explicitly warn against. GetAPIReader adds one apiserver call per Cluster reconcile to
+		// fetch the kubeconfig secret; not hot enough to justify a dedicated kubeconfig-only cache.
+		//
+		// NOTE on indexes: the old ClusterCacheTracker registered remote.NodeProviderIDIndex
+		// defensively. MAAS never queries Nodes by field-selector spec.providerID (grep for
+		// MatchingFields / NodeProviderIDField in this repo: nothing). Omitting the index avoids
+		// per-workload-cluster index-informer overhead. If MAAS ever needs a Node->Machine reverse
+		// lookup, add Cache.Indexes = []{clustercache.NodeProviderIDIndex} to the Options below.
 		clusterCache, err := clustercache.SetupWithManager(ctx, mgr, clustercache.Options{
-			SecretClient: mgr.GetClient(),
+			SecretClient: mgr.GetAPIReader(),
 		}, concurrency(1))
 		if err != nil {
 			setupLog.Error(err, "unable to create cluster cache")

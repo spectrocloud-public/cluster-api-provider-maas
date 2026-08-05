@@ -402,22 +402,28 @@ func extractSystemIDFromProviderID(providerID string) string {
 	return parts[len(parts)-1]
 }
 
-// getKubeadmControlPlane retrieves the KubeadmControlPlane for the cluster
+// getKubeadmControlPlane retrieves the KubeadmControlPlane for the cluster.
+// In v1beta2 ContractVersionedObjectReference no longer carries a Version (the served version is
+// resolved from CRD contract labels at runtime), so we use the RESTMapper to look up the current
+// served GVK instead of hardcoding "v1beta2" — that way a future contract move (v1beta3, …) works
+// without a code change here.
 func (r *VMEvacuationReconciler) getKubeadmControlPlane(ctx context.Context, cluster *clusterv1.Cluster) (*unstructured.Unstructured, error) {
-	if cluster.Spec.ControlPlaneRef.Name == "" {
+	ref := cluster.Spec.ControlPlaneRef
+	if ref.Name == "" {
 		return nil, fmt.Errorf("cluster has no controlPlaneRef")
 	}
 
+	mapping, err := r.RESTMapper().RESTMapping(schema.GroupKind{Group: ref.APIGroup, Kind: ref.Kind})
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to resolve REST mapping for %s.%s", ref.Kind, ref.APIGroup)
+	}
+
 	kcp := &unstructured.Unstructured{}
-	kcp.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "controlplane.cluster.x-k8s.io",
-		Version: "v1beta2",
-		Kind:    "KubeadmControlPlane",
-	})
+	kcp.SetGroupVersionKind(mapping.GroupVersionKind)
 
 	key := client.ObjectKey{
 		Namespace: cluster.Namespace,
-		Name:      cluster.Spec.ControlPlaneRef.Name,
+		Name:      ref.Name,
 	}
 
 	if err := r.Get(ctx, key, kcp); err != nil {
