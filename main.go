@@ -126,12 +126,25 @@ func main() {
 	//ctx := ctrl.SetupSignalHandler()
 	ctx := context.Background()
 
+	// Probe guard (per v1beta2 migration cheatsheet §"Fork main.go"):
+	//   webhookPort != 0 (webhook-only pod, capi-webhook-system) -> StartedChecker (waits for the
+	//     webhook server to actually be listening before reporting ready).
+	//   webhookPort == 0 (controller-only pod, tenant ns)         -> healthz.Ping. Without this
+	//     the pod has no /healthz handler, kubelet 404s, and CrashLoops.
 	if webhookPort != 0 {
+		if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+			setupLog.Error(err, "unable to create ready check")
+			os.Exit(1)
+		}
+		if err := mgr.AddHealthzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+			setupLog.Error(err, "unable to create health check")
+			os.Exit(1)
+		}
+	} else {
 		if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
 			setupLog.Error(err, "unable to create ready check")
 			os.Exit(1)
 		}
-
 		if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 			setupLog.Error(err, "unable to create health check")
 			os.Exit(1)
