@@ -11,7 +11,7 @@ import (
 
 const (
 	CustomEndpointProvidedAnnotation = "spectrocloud.com/custom-dns-provided"
-	APIServerReadinessLabel           = "cluster-api-maas/api-server-ready"
+	APIServerReadinessLabel          = "cluster-api-maas/api-server-ready"
 )
 
 func IsCustomEndpointPresent(annotations map[string]string) bool {

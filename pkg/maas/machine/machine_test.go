@@ -250,7 +250,9 @@ func (f *fakeNetworkInterfaces) Interface(_, _ string) maasclient.NetworkInterfa
 	}
 	return &captureNetworkInterface{}
 }
-func (f *fakeNetworkInterfaces) SetBootInterfaceStaticIP(_ context.Context, _, _ string) error { return nil }
+func (f *fakeNetworkInterfaces) SetBootInterfaceStaticIP(_ context.Context, _, _ string) error {
+	return nil
+}
 func (f *fakeNetworkInterfaces) SetStaticIPOnInterfaceID(_ context.Context, _, _, _ string) error {
 	return nil
 }
@@ -268,9 +270,13 @@ type captureNetworkInterface struct {
 	linkErr          error
 }
 
-func (c *captureNetworkInterface) Get(_ context.Context) (maasclient.NetworkInterface, error) { return c, nil }
-func (c *captureNetworkInterface) Update(_ context.Context, _ maasclient.Params) error         { return nil }
-func (c *captureNetworkInterface) LinkSubnet(_ context.Context, _ string, _ string) error      { return c.linkErr }
+func (c *captureNetworkInterface) Get(_ context.Context) (maasclient.NetworkInterface, error) {
+	return c, nil
+}
+func (c *captureNetworkInterface) Update(_ context.Context, _ maasclient.Params) error { return nil }
+func (c *captureNetworkInterface) LinkSubnet(_ context.Context, _ string, _ string) error {
+	return c.linkErr
+}
 func (c *captureNetworkInterface) LinkSubnetWithMode(_ context.Context, subnetID, mode, _ string) error {
 	c.capturedSubnetID = subnetID
 	c.capturedMode = mode
@@ -285,16 +291,16 @@ func (c *captureNetworkInterface) UnlinkSubnet(_ context.Context, _ string) erro
 func (c *captureNetworkInterface) UpdateIPConfiguration(_ context.Context, _ maasclient.IPConfigurationUpdate) error {
 	return nil
 }
-func (c *captureNetworkInterface) SetStaticIP(_ context.Context, _ string) error          { return nil }
-func (c *captureNetworkInterface) SetDHCP(_ context.Context, _ string) error              { return nil }
-func (c *captureNetworkInterface) ID() string                                             { return "" }
-func (c *captureNetworkInterface) Name() string                                           { return "" }
-func (c *captureNetworkInterface) Type() string                                           { return "" }
-func (c *captureNetworkInterface) Enabled() bool                                          { return true }
-func (c *captureNetworkInterface) MACAddress() string                                     { return "" }
-func (c *captureNetworkInterface) Links() []maasclient.NetworkInterfaceLink                { return nil }
-func (c *captureNetworkInterface) Children() []string                                     { return nil }
-func (c *captureNetworkInterface) VLAN() maasclient.VLAN                                  { return nil }
+func (c *captureNetworkInterface) SetStaticIP(_ context.Context, _ string) error { return nil }
+func (c *captureNetworkInterface) SetDHCP(_ context.Context, _ string) error     { return nil }
+func (c *captureNetworkInterface) ID() string                                    { return "" }
+func (c *captureNetworkInterface) Name() string                                  { return "" }
+func (c *captureNetworkInterface) Type() string                                  { return "" }
+func (c *captureNetworkInterface) Enabled() bool                                 { return true }
+func (c *captureNetworkInterface) MACAddress() string                            { return "" }
+func (c *captureNetworkInterface) Links() []maasclient.NetworkInterfaceLink      { return nil }
+func (c *captureNetworkInterface) Children() []string                            { return nil }
+func (c *captureNetworkInterface) VLAN() maasclient.VLAN                         { return nil }
 
 // fakeNetworkInterface is an in-memory NetworkInterface with a configurable name, ID, and links.
 type fakeNetworkInterface struct {
@@ -303,25 +309,31 @@ type fakeNetworkInterface struct {
 	links []maasclient.NetworkInterfaceLink
 }
 
-func (f *fakeNetworkInterface) Get(_ context.Context) (maasclient.NetworkInterface, error) { return f, nil }
-func (f *fakeNetworkInterface) Update(_ context.Context, _ maasclient.Params) error         { return nil }
-func (f *fakeNetworkInterface) LinkSubnet(_ context.Context, _, _ string) error             { return nil }
-func (f *fakeNetworkInterface) LinkSubnetWithMode(_ context.Context, _, _, _ string) error  { return nil }
-func (f *fakeNetworkInterface) LinkSubnetWithForce(_ context.Context, _, _, _ string) error { return nil }
-func (f *fakeNetworkInterface) UnlinkSubnet(_ context.Context, _ string) error              { return nil }
+func (f *fakeNetworkInterface) Get(_ context.Context) (maasclient.NetworkInterface, error) {
+	return f, nil
+}
+func (f *fakeNetworkInterface) Update(_ context.Context, _ maasclient.Params) error { return nil }
+func (f *fakeNetworkInterface) LinkSubnet(_ context.Context, _, _ string) error     { return nil }
+func (f *fakeNetworkInterface) LinkSubnetWithMode(_ context.Context, _, _, _ string) error {
+	return nil
+}
+func (f *fakeNetworkInterface) LinkSubnetWithForce(_ context.Context, _, _, _ string) error {
+	return nil
+}
+func (f *fakeNetworkInterface) UnlinkSubnet(_ context.Context, _ string) error { return nil }
 func (f *fakeNetworkInterface) UpdateIPConfiguration(_ context.Context, _ maasclient.IPConfigurationUpdate) error {
 	return nil
 }
-func (f *fakeNetworkInterface) SetStaticIP(_ context.Context, _ string) error          { return nil }
-func (f *fakeNetworkInterface) SetDHCP(_ context.Context, _ string) error              { return nil }
-func (f *fakeNetworkInterface) ID() string                                             { return f.id }
-func (f *fakeNetworkInterface) Name() string                                           { return f.name }
-func (f *fakeNetworkInterface) Type() string                                           { return "" }
-func (f *fakeNetworkInterface) Enabled() bool                                          { return true }
-func (f *fakeNetworkInterface) MACAddress() string                                     { return "" }
-func (f *fakeNetworkInterface) Links() []maasclient.NetworkInterfaceLink               { return f.links }
-func (f *fakeNetworkInterface) Children() []string                                     { return nil }
-func (f *fakeNetworkInterface) VLAN() maasclient.VLAN                                  { return nil }
+func (f *fakeNetworkInterface) SetStaticIP(_ context.Context, _ string) error { return nil }
+func (f *fakeNetworkInterface) SetDHCP(_ context.Context, _ string) error     { return nil }
+func (f *fakeNetworkInterface) ID() string                                    { return f.id }
+func (f *fakeNetworkInterface) Name() string                                  { return f.name }
+func (f *fakeNetworkInterface) Type() string                                  { return "" }
+func (f *fakeNetworkInterface) Enabled() bool                                 { return true }
+func (f *fakeNetworkInterface) MACAddress() string                            { return "" }
+func (f *fakeNetworkInterface) Links() []maasclient.NetworkInterfaceLink      { return f.links }
+func (f *fakeNetworkInterface) Children() []string                            { return nil }
+func (f *fakeNetworkInterface) VLAN() maasclient.VLAN                         { return nil }
 
 // fakeNetworkInterfaceLink is a minimal NetworkInterfaceLink with a configurable subnet.
 type fakeNetworkInterfaceLink struct {

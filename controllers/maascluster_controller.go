@@ -354,7 +354,6 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 		clusterScope.Info("Waiting on API server DNS name")
 		return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
 	}
-	
 
 	maasCluster.Spec.ControlPlaneEndpoint = infrav1beta1.APIEndpoint{
 		Host: maasCluster.Status.Network.DNSName,
