@@ -264,6 +264,52 @@ func (m *MachineScope) GetRawBootstrapData() ([]byte, error) {
 	return value, nil
 }
 
+// findNodeByHostname attempts to find a node by trying different hostname variations
+// It tries both the exact hostname and hostname with FQDN stripped to handle
+// different node naming conventions across different Kubernetes setups
+func (m *MachineScope) findNodeByHostname(ctx context.Context, remoteClient client.Client, hostname string) (*corev1.Node, error) {
+	if hostname == "" {
+		return nil, errors.New("hostname cannot be empty")
+	}
+
+	node := &corev1.Node{}
+
+	// First try with the exact hostname (lowercased)
+	nodeName := strings.ToLower(hostname)
+	err := remoteClient.Get(ctx, client.ObjectKey{Name: nodeName}, node)
+	if err == nil {
+		return node, nil
+	}
+
+	// If that fails and the hostname contains a dot (potential FQDN), try with just the hostname part
+	if strings.Contains(hostname, ".") {
+		shortHostname := strings.ToLower(strings.Split(hostname, ".")[0])
+		if shortHostname != nodeName { // Avoid duplicate attempt
+			err = remoteClient.Get(ctx, client.ObjectKey{Name: shortHostname}, node)
+			if err == nil {
+				return node, nil
+			}
+		}
+	}
+
+	// If hostname doesn't contain a dot, try common FQDN patterns by listing nodes
+	// and matching against hostname prefixes
+	nodeList := &corev1.NodeList{}
+	if listErr := remoteClient.List(ctx, nodeList); listErr == nil {
+		targetPrefix := strings.ToLower(hostname)
+		for _, n := range nodeList.Items {
+			nodeHostname := strings.ToLower(n.Name)
+			// Check if node name starts with our hostname (e.g., "node1" matches "node1.example.com")
+			if strings.HasPrefix(nodeHostname, targetPrefix+".") {
+				return &n, nil
+			}
+		}
+	}
+
+	// Return the original error if all attempts failed
+	return nil, err
+}
+
 // SetNodeProviderID patches the node with the ID
 func (m *MachineScope) SetNodeProviderID() error {
 	ctx := context.TODO()
@@ -272,9 +318,9 @@ func (m *MachineScope) SetNodeProviderID() error {
 		return err
 	}
 
-	node := &corev1.Node{}
-	if err := remoteClient.Get(ctx, client.ObjectKey{Name: strings.ToLower(m.GetMachineHostname())}, node); err != nil {
-		return err
+	node, err := m.findNodeByHostname(ctx, remoteClient, m.GetMachineHostname())
+	if err != nil {
+		return errors.Wrapf(err, "failed to find node for hostname %s", m.GetMachineHostname())
 	}
 
 	providerID := m.GetProviderID()

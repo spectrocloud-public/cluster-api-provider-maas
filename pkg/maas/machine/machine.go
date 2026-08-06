@@ -594,11 +594,19 @@ func fromSDKTypeToMachine(m maasclient.Machine) *infrav1beta1.Machine {
 			Type:    clusterv1.MachineExternalDNS,
 			Address: m.FQDN(),
 		})
+		machine.Addresses = append(machine.Addresses, clusterv1.MachineAddress{
+			Type:    clusterv1.MachineInternalDNS,
+			Address: m.FQDN(),
+		})
 	}
 
 	for _, v := range m.IPAddresses() {
 		machine.Addresses = append(machine.Addresses, clusterv1.MachineAddress{
 			Type:    clusterv1.MachineExternalIP,
+			Address: v.String(),
+		})
+		machine.Addresses = append(machine.Addresses, clusterv1.MachineAddress{
+			Type:    clusterv1.MachineInternalIP,
 			Address: v.String(),
 		})
 	}
