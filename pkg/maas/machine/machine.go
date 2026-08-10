@@ -1141,11 +1141,13 @@ func fromSDKTypeToMachine(m maasclient.Machine) *infrav1beta1.Machine {
 	if zone != nil && !hasNilValue(zone) {
 		az = zone.Name()
 	}
+	ps := m.PowerState()
 	machine := &infrav1beta1.Machine{
 		ID:               m.SystemID(),
 		Hostname:         m.Hostname(),
 		State:            infrav1beta1.MachineState(m.State()),
-		Powered:          m.PowerState() == "on",
+		Powered:          ps == infrav1beta1.MachinePowerStateOn,
+		PowerState:       ps,
 		AvailabilityZone: az,
 	}
 

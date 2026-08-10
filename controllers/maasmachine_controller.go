@@ -523,7 +523,7 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 		conditions.MarkFalse(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, infrav1beta1.MachineTerminatedReason, clusterv1.ConditionSeverityError, "")
 		machineScope.SetFailureReason(capierrors.UpdateMachineError)
 		machineScope.SetFailureMessage(errors.Errorf("Maas machine state %q is unexpected", m.State))
-	case machineScope.MachineIsInKnownState() && !m.Powered:
+	case machineScope.MachineIsInKnownState() && isConfirmedPoweredOff(m.PowerState):
 		if *machineScope.GetMachineState() == infrav1beta1.MachineStateDeployed {
 			machineScope.Info("Deployed machine is powered off trying power on")
 			if err := machineSvc.PowerOnMachine(); err != nil {
@@ -585,6 +585,23 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// isConfirmedPoweredOff reports whether a raw MAAS power_state reading is a positively-confirmed
+// off, and therefore safe to act on by issuing a power-on.
+//
+// MAAS reports "error" (or an empty/unrecognised value) when the BMC query itself failed, which
+// says nothing about the chassis - the host is very often still running, with only its management
+// path unreachable. MAAS's IPMI driver executes op-power_on as `ipmipower --cycle --on-if-off`
+// (Canonical Launchpad #1730089, Won't-Fix), so acting on an unconfirmed reading hard power-cycles
+// a healthy node.
+//
+// Restricting to a confirmed off loses no recovery: MAAS must be able to reach the BMC in order to
+// execute a power-on at all, and whenever it can reach the BMC it reports "on" or "off" - never
+// "error". A genuinely down node therefore reports a confirmed off as soon as its BMC is reachable,
+// and is recovered on that reconcile.
+func isConfirmedPoweredOff(powerState string) bool {
+	return powerState == infrav1beta1.MachinePowerStateOff
 }
 
 func (r *MaasMachineReconciler) deployMachine(machineScope *scope.MachineScope, machineSvc *maasmachine.Service) (*infrav1beta1.Machine, error) {
