@@ -540,6 +540,12 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 		machineScope.SetNotReady()
 		conditions.MarkFalse(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, infrav1beta1.MachineDeployingReason, clusterv1.ConditionSeverityWarning, "")
 	case s == infrav1beta1.MachineStateDeployed:
+		if !m.Powered {
+			// PCP-7384: power state is not a confirmed "off" (error/unknown/"") — the BMC query
+			// failed, so the node is very likely still running. Power-on is intentionally skipped;
+			// log it so the decision is visible instead of silently marking Ready.
+			machineScope.V(1).Info("power state not confirmed off; skipping power-on", "powerState", m.PowerState)
+		}
 		machineScope.SetReady()
 		conditions.MarkTrue(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition)
 	default:
