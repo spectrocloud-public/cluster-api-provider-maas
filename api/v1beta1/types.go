@@ -73,6 +73,20 @@ var (
 	)
 )
 
+// MAAS power_state values, mirroring the MAAS POWER_STATE enum.
+//
+// Only MachinePowerStateOn and MachinePowerStateOff are positive confirmations that MAAS
+// successfully queried the BMC. MachinePowerStateError and MachinePowerStateUnknown (as well
+// as an empty or any unrecognised value) mean the query itself did not yield a chassis state -
+// the host is very often still running, with only its management path unreachable. Never treat
+// those as a confirmed off.
+const (
+	MachinePowerStateOn      = "on"
+	MachinePowerStateOff     = "off"
+	MachinePowerStateError   = "error"
+	MachinePowerStateUnknown = "unknown"
+)
+
 // Instance describes an MAAS Machine.
 type Machine struct {
 	ID string
@@ -85,6 +99,11 @@ type Machine struct {
 
 	// The current state of the machine.
 	Powered bool
+
+	// PowerState is the raw MAAS power_state reading: "on", "off", "error", or "" (unknown).
+	// Kept alongside Powered so callers can distinguish a positively-confirmed off from a
+	// failed BMC query, which Powered alone collapses into false.
+	PowerState string
 
 	// The AZ of the machine
 	AvailabilityZone string
