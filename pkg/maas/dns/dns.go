@@ -118,6 +118,42 @@ func (s *Service) GetAPIServerDNSRecords() (sets.String, error) {
 	return ips, nil
 }
 
+// GetMachineIPForInterface returns a machine IP that belongs to the provided
+// interface name.
+func (s *Service) GetMachineIPForInterface(systemID, interfaceName string) (string, error) {
+	if systemID == "" {
+		return "", errors.New("systemID is required")
+	}
+	if interfaceName == "" {
+		return "", errors.New("interfaceName is required")
+	}
+
+	ctx := context.TODO()
+	interfaces, err := s.maasClient.NetworkInterfaces().Get(ctx, systemID)
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to list interfaces for machine %q", systemID)
+	}
+
+	for _, iface := range interfaces {
+		if iface == nil || iface.Name() != interfaceName {
+			continue
+		}
+
+		for _, link := range iface.Links() {
+			if link == nil || link.IPAddress() == nil {
+				continue
+			}
+			if ip := link.IPAddress().String(); ip != "" && ip != "<nil>" {
+				return ip, nil
+			}
+		}
+
+		return "", errors.Errorf("no IP found on interface %q for machine %q", interfaceName, systemID)
+	}
+
+	return "", errors.Errorf("interface %q not found for machine %q", interfaceName, systemID)
+}
+
 func (s *Service) GetDNSResource() (maasclient.DNSResource, error) {
 	dnsName := s.scope.GetDNSName()
 	if dnsName == "" {

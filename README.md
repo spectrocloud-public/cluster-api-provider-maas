@@ -102,6 +102,32 @@ clusterctl init --infrastructure maas:v0.9.0
 clusterctl generate cluster t-cluster --infrastructure=maas:v0.9.0 --kubernetes-version v1.33.5 --control-plane-machine-count=1 --worker-machine-count=3 | kubectl apply -f -
 ```
 
+### API server DNS interface selection (optional)
+
+If you want API server DNS records to use the IP from a specific MAAS interface
+(instead of the default PXE-path/IP ordering), set `apiServerInterfaceName` in
+`MaasCluster.spec`:
+
+```yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: MaasCluster
+metadata:
+  name: cluster1
+spec:
+  dnsDomain: maas.domain
+  apiServerInterfaceName: eno2
+```
+
+Fallback behavior:
+- If `apiServerInterfaceName` is empty/unset, CAPMAAS keeps the previous behavior
+  and uses the first `MachineExternalIP` from machine status.
+
+You can verify which interface is currently being used via status:
+
+```bash
+kubectl get maascluster <name> -n <namespace> -o jsonpath='{.status.network.publishedInterfaceName}{"\n"}'
+```
+
 ### Testing the provider
 
 ```bash

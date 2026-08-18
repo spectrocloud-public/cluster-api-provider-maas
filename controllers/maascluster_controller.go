@@ -173,22 +173,33 @@ func (r *MaasClusterReconciler) reconcileDNSAttachments(clusterScope *scope.Clus
 
 	machinesPendingAttachment := make([]*infrav1beta1.MaasMachine, 0)
 	machinesPendingDetachment := make([]*infrav1beta1.MaasMachine, 0)
+	preferredInterfaceName := clusterScope.MaasCluster.Spec.APIServerInterfaceName
 
 	for _, m := range machines {
 		if !IsControlPlaneMachine(m) {
 			continue
 		}
 
-		machineIP := getExternalMachineIP(m)
-		attached := currentIPs.Has(machineIP)
 		isRunningHealthy := IsRunning(m)
+		var machineIP string
+
+		if !m.DeletionTimestamp.IsZero() || !isRunningHealthy {
+			machineIP = getExternalMachineIP(m)
+		} else {
+			machineIP, err = selectMachineIPForDNS(m, preferredInterfaceName, dnssvc)
+			if err != nil {
+				return errors.Wrapf(err, "unable to select API server IP for machine %q", m.Name)
+			}
+		}
+
+		attached := currentIPs.Has(machineIP)
 
 		if !m.DeletionTimestamp.IsZero() || !isRunningHealthy {
 			if attached {
 				clusterScope.Info("Cleaning up IP on unhealthy machine", "machine", m.Name)
 				machinesPendingDetachment = append(machinesPendingDetachment, m)
 			}
-		} else if IsRunning(m) {
+		} else if isRunningHealthy {
 			if !attached {
 				clusterScope.Info("Healthy machine without DNS attachment; attaching.", "machine", m.Name)
 				machinesPendingAttachment = append(machinesPendingAttachment, m)
@@ -207,6 +218,8 @@ func (r *MaasClusterReconciler) reconcileDNSAttachments(clusterScope *scope.Clus
 		clusterScope.Info("Pending DNS attachments or detachments; will retry again")
 		return ErrRequeueDNS
 	}
+
+	clusterScope.MaasCluster.Status.Network.PublishedInterfaceName = preferredInterfaceName
 
 	return nil
 }
@@ -234,6 +247,26 @@ func getExternalMachineIP(machine *infrav1beta1.MaasMachine) string {
 		}
 	}
 	return ""
+}
+
+type apiServerMachineIPResolver interface {
+	GetMachineIPForInterface(systemID, interfaceName string) (string, error)
+}
+
+func selectMachineIPForDNS(machine *infrav1beta1.MaasMachine, interfaceName string, resolver apiServerMachineIPResolver) (string, error) {
+	if interfaceName == "" {
+		return getExternalMachineIP(machine), nil
+	}
+
+	if machine.Spec.SystemID == nil || *machine.Spec.SystemID == "" {
+		return "", errors.Errorf("systemID not set for machine %q", machine.Name)
+	}
+
+	if resolver == nil {
+		return "", errors.New("machine IP resolver is required")
+	}
+
+	return resolver.GetMachineIPForInterface(*machine.Spec.SystemID, interfaceName)
 }
 
 func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope *scope.ClusterScope) (ctrl.Result, error) {

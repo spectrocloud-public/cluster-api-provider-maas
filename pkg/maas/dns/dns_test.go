@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -18,7 +19,10 @@ import (
 )
 
 // fakeClientSet minimally satisfies maasclient.ClientSetInterface for tests
-type fakeClientSet struct{ dns maasclient.DNSResources }
+type fakeClientSet struct {
+	dns               maasclient.DNSResources
+	networkInterfaces maasclient.NetworkInterfaces
+}
 
 func (f *fakeClientSet) BootResources() maasclient.BootResources         { return nil }
 func (f *fakeClientSet) DNSResources() maasclient.DNSResources           { return f.dns }
@@ -26,7 +30,7 @@ func (f *fakeClientSet) Domains() maasclient.Domains                     { retur
 func (f *fakeClientSet) IPAddresses() maasclient.IPAddresses             { return nil }
 func (f *fakeClientSet) Tags() maasclient.Tags                           { return nil }
 func (f *fakeClientSet) Machines() maasclient.Machines                   { return nil }
-func (f *fakeClientSet) NetworkInterfaces() maasclient.NetworkInterfaces { return nil }
+func (f *fakeClientSet) NetworkInterfaces() maasclient.NetworkInterfaces { return f.networkInterfaces }
 func (f *fakeClientSet) RackControllers() maasclient.RackControllers     { return nil }
 func (f *fakeClientSet) ResourcePools() maasclient.ResourcePools         { return nil }
 func (f *fakeClientSet) Spaces() maasclient.Spaces                       { return nil }
@@ -42,6 +46,78 @@ type fakeIPAddress struct{ ip net.IP }
 
 func (f *fakeIPAddress) IP() net.IP                                  { return f.ip }
 func (f *fakeIPAddress) InterfaceSet() []maasclient.NetworkInterface { return nil }
+
+type fakeNetworkInterfaces struct {
+	interfaces []maasclient.NetworkInterface
+	err        error
+}
+
+func (f *fakeNetworkInterfaces) Get(_ context.Context, _ string) ([]maasclient.NetworkInterface, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.interfaces, nil
+}
+
+func (f *fakeNetworkInterfaces) Interface(_, _ string) maasclient.NetworkInterface {
+	return nil
+}
+
+func (f *fakeNetworkInterfaces) SetBootInterfaceStaticIP(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (f *fakeNetworkInterfaces) SetStaticIPOnInterfaceID(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (f *fakeNetworkInterfaces) CreateBridge(_ context.Context, _, _, _ string) (maasclient.NetworkInterface, error) {
+	return nil, nil
+}
+
+func (f *fakeNetworkInterfaces) CreateBootInterfaceBridge(_ context.Context, _, _ string) (maasclient.NetworkInterface, error) {
+	return nil, nil
+}
+
+type fakeNetworkInterface struct {
+	name  string
+	links []maasclient.NetworkInterfaceLink
+}
+
+func (f *fakeNetworkInterface) Get(_ context.Context) (maasclient.NetworkInterface, error) {
+	return f, nil
+}
+func (f *fakeNetworkInterface) Update(_ context.Context, _ maasclient.Params) error { return nil }
+func (f *fakeNetworkInterface) LinkSubnet(_ context.Context, _, _ string) error     { return nil }
+func (f *fakeNetworkInterface) LinkSubnetWithMode(_ context.Context, _, _, _ string) error {
+	return nil
+}
+func (f *fakeNetworkInterface) LinkSubnetWithForce(_ context.Context, _, _, _ string) error {
+	return nil
+}
+func (f *fakeNetworkInterface) UnlinkSubnet(_ context.Context, _ string) error { return nil }
+func (f *fakeNetworkInterface) UpdateIPConfiguration(_ context.Context, _ maasclient.IPConfigurationUpdate) error {
+	return nil
+}
+func (f *fakeNetworkInterface) SetStaticIP(_ context.Context, _ string) error { return nil }
+func (f *fakeNetworkInterface) SetDHCP(_ context.Context, _ string) error     { return nil }
+func (f *fakeNetworkInterface) ID() string                                    { return "" }
+func (f *fakeNetworkInterface) Name() string                                  { return f.name }
+func (f *fakeNetworkInterface) Type() string                                  { return "" }
+func (f *fakeNetworkInterface) Enabled() bool                                 { return true }
+func (f *fakeNetworkInterface) MACAddress() string                            { return "" }
+func (f *fakeNetworkInterface) Links() []maasclient.NetworkInterfaceLink      { return f.links }
+func (f *fakeNetworkInterface) Children() []string                            { return nil }
+func (f *fakeNetworkInterface) VLAN() maasclient.VLAN                         { return nil }
+
+type fakeNetworkInterfaceLink struct {
+	ip net.IP
+}
+
+func (f *fakeNetworkInterfaceLink) ID() string                { return "" }
+func (f *fakeNetworkInterfaceLink) Mode() string              { return "" }
+func (f *fakeNetworkInterfaceLink) Subnet() maasclient.Subnet { return nil }
+func (f *fakeNetworkInterfaceLink) IPAddress() net.IP         { return f.ip }
 
 func TestDNS(t *testing.T) {
 	log := klogr.New()
@@ -148,5 +224,100 @@ func TestDNS(t *testing.T) {
 
 		g.Expect(err).ToNot(HaveOccurred())
 		g.Expect(res).To(BeTrue())
+	})
+}
+
+func TestGetMachineIPForInterface(t *testing.T) {
+	t.Run("returns ip from selected interface", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		s := &Service{
+			maasClient: &fakeClientSet{
+				networkInterfaces: &fakeNetworkInterfaces{
+					interfaces: []maasclient.NetworkInterface{
+						&fakeNetworkInterface{
+							name: "eno1",
+							links: []maasclient.NetworkInterfaceLink{
+								&fakeNetworkInterfaceLink{ip: net.ParseIP("10.0.0.10")},
+							},
+						},
+						&fakeNetworkInterface{
+							name: "eno2",
+							links: []maasclient.NetworkInterfaceLink{
+								&fakeNetworkInterfaceLink{ip: net.ParseIP("10.0.0.20")},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		ip, err := s.GetMachineIPForInterface("abc123", "eno2")
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(ip).To(Equal("10.0.0.20"))
+	})
+
+	t.Run("fails when interface is not found", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		s := &Service{
+			maasClient: &fakeClientSet{
+				networkInterfaces: &fakeNetworkInterfaces{
+					interfaces: []maasclient.NetworkInterface{
+						&fakeNetworkInterface{name: "eno1"},
+					},
+				},
+			},
+		}
+
+		_, err := s.GetMachineIPForInterface("abc123", "eno2")
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring("interface \"eno2\" not found"))
+	})
+
+	t.Run("fails when selected interface has no ip", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		s := &Service{
+			maasClient: &fakeClientSet{
+				networkInterfaces: &fakeNetworkInterfaces{
+					interfaces: []maasclient.NetworkInterface{
+						&fakeNetworkInterface{
+							name:  "eno2",
+							links: []maasclient.NetworkInterfaceLink{},
+						},
+					},
+				},
+			},
+		}
+
+		_, err := s.GetMachineIPForInterface("abc123", "eno2")
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring("no IP found on interface \"eno2\""))
+	})
+
+	t.Run("fails when listing interfaces fails", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		s := &Service{
+			maasClient: &fakeClientSet{
+				networkInterfaces: &fakeNetworkInterfaces{
+					err: errors.New("boom"),
+				},
+			},
+		}
+
+		_, err := s.GetMachineIPForInterface("abc123", "eno2")
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring("failed to list interfaces"))
+	})
+
+	t.Run("validates required params", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		s := &Service{maasClient: &fakeClientSet{}}
+
+		_, err := s.GetMachineIPForInterface("", "eno2")
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring("systemID is required"))
+
+		_, err = s.GetMachineIPForInterface("abc123", "")
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring("interfaceName is required"))
 	})
 }

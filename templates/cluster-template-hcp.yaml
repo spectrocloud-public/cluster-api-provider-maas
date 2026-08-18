@@ -35,6 +35,8 @@ metadata:
   name: ${CLUSTER_NAME}
 spec:
   dnsDomain: ${DNS_DOMAIN}
+  # Optional: pin API server DNS attachments to an interface name (e.g. "eno2").
+  # apiServerInterfaceName: eno2
   failureDomains:
     - ${CONTROL_PLANE_ZONE}
     - default
