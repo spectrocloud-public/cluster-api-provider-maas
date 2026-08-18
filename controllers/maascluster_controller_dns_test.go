@@ -8,9 +8,9 @@ import (
 	"github.com/pkg/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/klog/v2/klogr"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/klog/v2/klogr"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -80,9 +80,9 @@ func newTestClusterScope(t *testing.T, maasCluster *infrav1beta1.MaasCluster, ma
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(machines...).Build()
 
 	cs, err := scope.NewClusterScope(scope.ClusterScopeParams{
-		Client:  fakeClient,
-		Logger:  klogr.New(),
-		Cluster: &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "test-ns"}},
+		Client:      fakeClient,
+		Logger:      klogr.New(),
+		Cluster:     &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "test-ns"}},
 		MaasCluster: maasCluster,
 	})
 	if err != nil {

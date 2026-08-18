@@ -50,7 +50,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -288,7 +288,7 @@ func (r *VMEvacuationReconciler) findCPMachinesOnMaintenanceHosts(ctx context.Co
 
 		maasMachine := &infrav1beta1.MaasMachine{}
 		key := client.ObjectKey{
-			Namespace: machine.Spec.InfrastructureRef.Namespace,
+			Namespace: machine.Namespace,
 			Name:      machine.Spec.InfrastructureRef.Name,
 		}
 
@@ -402,22 +402,28 @@ func extractSystemIDFromProviderID(providerID string) string {
 	return parts[len(parts)-1]
 }
 
-// getKubeadmControlPlane retrieves the KubeadmControlPlane for the cluster
+// getKubeadmControlPlane retrieves the KubeadmControlPlane for the cluster.
+// In v1beta2 ContractVersionedObjectReference no longer carries a Version (the served version is
+// resolved from CRD contract labels at runtime), so we use the RESTMapper to look up the current
+// served GVK instead of hardcoding "v1beta2" — that way a future contract move (v1beta3, …) works
+// without a code change here.
 func (r *VMEvacuationReconciler) getKubeadmControlPlane(ctx context.Context, cluster *clusterv1.Cluster) (*unstructured.Unstructured, error) {
-	if cluster.Spec.ControlPlaneRef == nil {
+	ref := cluster.Spec.ControlPlaneRef
+	if ref.Name == "" {
 		return nil, fmt.Errorf("cluster has no controlPlaneRef")
 	}
 
+	mapping, err := r.RESTMapper().RESTMapping(schema.GroupKind{Group: ref.APIGroup, Kind: ref.Kind})
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to resolve REST mapping for %s.%s", ref.Kind, ref.APIGroup)
+	}
+
 	kcp := &unstructured.Unstructured{}
-	kcp.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "controlplane.cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "KubeadmControlPlane",
-	})
+	kcp.SetGroupVersionKind(mapping.GroupVersionKind)
 
 	key := client.ObjectKey{
-		Namespace: cluster.Spec.ControlPlaneRef.Namespace,
-		Name:      cluster.Spec.ControlPlaneRef.Name,
+		Namespace: cluster.Namespace,
+		Name:      ref.Name,
 	}
 
 	if err := r.Get(ctx, key, kcp); err != nil {

@@ -32,10 +32,9 @@ import (
 var maasmachinelog = logf.Log.WithName("maasmachine-resource")
 
 func (r *MaasMachine) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(r).
-		WithDefaulter(r). // registers webhook.CustomDefaulter
-		WithValidator(r). // registers webhook.CustomValidator
+	return ctrl.NewWebhookManagedBy(mgr, r).
+		WithCustomDefaulter(r).
+		WithCustomValidator(r).
 		Complete()
 }
 

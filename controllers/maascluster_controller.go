@@ -30,10 +30,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	"sigs.k8s.io/cluster-api/controllers/remote"
+	"k8s.io/utils/ptr"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	"sigs.k8s.io/cluster-api/util"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/cluster-api/util/predicates"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -69,7 +70,7 @@ type MaasClusterReconciler struct {
 	Scheme              *runtime.Scheme
 	Recorder            record.EventRecorder
 	GenericEventChannel chan event.GenericEvent
-	Tracker             *remote.ClusterCacheTracker
+	Tracker             clustercache.ClusterCache
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=maasclusters,verbs=get;list;watch;create;update;patch;delete
@@ -123,11 +124,12 @@ func (r *MaasClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Support FailureDomains
 	// In cloud providers this would likely look up which failure domains are supported and set the status appropriately.
 	// so kCP will distribute the CPs across multiple failure domains
-	failureDomains := make(clusterv1.FailureDomains)
+	failureDomains := []clusterv1.FailureDomain{}
 	for _, az := range maasCluster.Spec.FailureDomains {
-		failureDomains[az] = clusterv1.FailureDomainSpec{
-			ControlPlane: true,
-		}
+		failureDomains = append(failureDomains, clusterv1.FailureDomain{
+			Name:         az,
+			ControlPlane: ptr.To(true),
+		})
 	}
 	maasCluster.Status.FailureDomains = failureDomains
 
@@ -343,7 +345,7 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 
 	if err := dnsService.ReconcileDNS(); err != nil {
 		clusterScope.Error(err, "failed to reconcile load balancer")
-		conditions.MarkFalse(maasCluster, infrav1beta1.DNSReadyCondition, infrav1beta1.DNSFailedReason, clusterv1.ConditionSeverityError, err.Error())
+		conditions.MarkFalse(maasCluster, infrav1beta1.DNSReadyCondition, infrav1beta1.DNSFailedReason, clusterv1.ConditionSeverityError, "%s", err.Error())
 		return reconcile.Result{}, err
 	}
 
@@ -352,7 +354,6 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 		clusterScope.Info("Waiting on API server DNS name")
 		return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
 	}
-	
 
 	maasCluster.Spec.ControlPlaneEndpoint = infrav1beta1.APIEndpoint{
 		Host: maasCluster.Status.Network.DNSName,
@@ -421,7 +422,7 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 		lxdService := lxd.NewService(clusterScope)
 		if err := lxdService.ReconcileLXD(); err != nil {
 			clusterScope.Error(err, "failed to reconcile LXD hosts")
-			conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError, err.Error())
+			conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError, "%s", err.Error())
 			return reconcile.Result{}, err
 		}
 		conditions.MarkTrue(maasCluster, infrav1beta1.LXDReadyCondition)

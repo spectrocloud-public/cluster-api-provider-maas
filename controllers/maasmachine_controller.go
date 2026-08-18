@@ -31,12 +31,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/record"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	"sigs.k8s.io/cluster-api/controllers/remote"
+	"k8s.io/utils/ptr"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	capierrors "sigs.k8s.io/cluster-api/errors"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/cluster-api/util/predicates"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -62,7 +63,7 @@ type MaasMachineReconciler struct {
 	Log      logr.Logger
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
-	Tracker  *remote.ClusterCacheTracker
+	Tracker  clustercache.ClusterCache
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=maasmachines,verbs=get;list;watch;create;update;patch;delete
@@ -357,7 +358,7 @@ func (r *MaasMachineReconciler) maybeDeleteDynamicLXDVM(clusterScope *scope.Clus
 
 // finalizeMachineDeletion marks conditions, records event, and removes the finalizer
 func (r *MaasMachineReconciler) finalizeMachineDeletion(machineScope *scope.MachineScope, maasMachine *infrav1beta1.MaasMachine, systemID string) {
-	conditions.MarkFalse(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, clusterv1.DeletedReason, clusterv1.ConditionSeverityInfo, "")
+	conditions.MarkFalse(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, "Deleted", clusterv1.ConditionSeverityInfo, "")
 	r.Recorder.Eventf(machineScope.MaasMachine, corev1.EventTypeNormal, "SuccessfulRelease", "Released instance %q", systemID)
 	controllerutil.RemoveFinalizer(maasMachine, infrav1beta1.MachineFinalizer)
 }
@@ -403,7 +404,7 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 		return ctrl.Result{}, nil
 	}
 
-	if !machineScope.Cluster.Status.InfrastructureReady {
+	if !ptr.Deref(machineScope.Cluster.Status.Initialization.InfrastructureProvisioned, false) {
 		machineScope.Info("Cluster infrastructure is not ready yet")
 		conditions.MarkFalse(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, infrav1beta1.WaitingForClusterInfrastructureReason, clusterv1.ConditionSeverityInfo, "")
 		return ctrl.Result{}, nil
@@ -431,7 +432,7 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 	m, err := r.findMachine(machineScope, machineSvc)
 	if err != nil {
 		machineScope.Error(err, "unable to find m")
-		conditions.MarkUnknown(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, infrav1beta1.MachineNotFoundReason, err.Error())
+		conditions.MarkUnknown(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, infrav1beta1.MachineNotFoundReason, "%s", err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -473,7 +474,7 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 			machineScope.Error(err, "unable to create m")
-			conditions.MarkFalse(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, infrav1beta1.MachineDeployFailedReason, clusterv1.ConditionSeverityError, err.Error())
+			conditions.MarkFalse(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, infrav1beta1.MachineDeployFailedReason, clusterv1.ConditionSeverityError, "%s", err.Error())
 			return ctrl.Result{}, err
 		}
 
@@ -751,7 +752,7 @@ func (r *MaasMachineReconciler) MaasClusterToMaasMachines(_ context.Context, o c
 		if m.Spec.InfrastructureRef.Name == "" {
 			continue
 		}
-		name := client.ObjectKey{Namespace: m.Spec.InfrastructureRef.Namespace, Name: m.Spec.InfrastructureRef.Name}
+		name := client.ObjectKey{Namespace: m.Namespace, Name: m.Spec.InfrastructureRef.Name}
 		result = append(result, ctrl.Request{NamespacedName: name})
 	}
 

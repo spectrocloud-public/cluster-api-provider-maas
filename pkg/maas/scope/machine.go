@@ -28,11 +28,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/pointer"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	"sigs.k8s.io/cluster-api/controllers/remote"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	capierrors "sigs.k8s.io/cluster-api/errors"
 	"sigs.k8s.io/cluster-api/util"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -47,7 +47,7 @@ type MachineScopeParams struct {
 	MaasMachine    *infrav1beta1.MaasMachine
 	ControllerName string
 
-	Tracker *remote.ClusterCacheTracker
+	Tracker clustercache.ClusterCache
 }
 
 // MachineScope defines the basic context for an actuator to operate upon.
@@ -63,7 +63,7 @@ type MachineScope struct {
 	MaasMachine *infrav1beta1.MaasMachine
 
 	controllerName string
-	tracker        *remote.ClusterCacheTracker
+	tracker        clustercache.ClusterCache
 }
 
 // NewMachineScope creates a new Scope from the supplied parameters.
@@ -108,9 +108,9 @@ func (m *MachineScope) PatchObject() error {
 	return m.patchHelper.Patch(
 		context.TODO(),
 		m.MaasMachine,
-		patch.WithOwnedConditions{Conditions: []clusterv1.ConditionType{
-			clusterv1.ReadyCondition,
-			infrav1beta1.MachineDeployedCondition,
+		patch.WithOwnedConditions{Conditions: []string{
+			string(clusterv1.ReadyCondition),
+			string(infrav1beta1.MachineDeployedCondition),
 		}},
 	)
 }

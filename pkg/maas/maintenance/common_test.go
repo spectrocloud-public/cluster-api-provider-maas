@@ -1,9 +1,9 @@
 package maintenance
 
 import (
+	"fmt"
 	"os"
 	"testing"
-	"fmt"
 
 	maasclient "github.com/spectrocloud/maas-client-go/maasclient"
 )
@@ -11,7 +11,7 @@ import (
 // Integration test for ListHostVMs. Skips unless MAAS_ENDPOINT, MAAS_API_KEY and
 // TEST_MAAS_HOST_SYSTEM_ID are provided in the environment.
 func TestListHostVMs_Integration(t *testing.T) {
-	
+
 	endpoint := os.Getenv("MAAS_ENDPOINT")
 	apiKey := os.Getenv("MAAS_API_KEY")
 	hostID := os.Getenv("TEST_MAAS_HOST_SYSTEM_ID")

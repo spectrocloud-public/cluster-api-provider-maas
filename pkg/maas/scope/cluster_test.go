@@ -23,18 +23,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2/klogr"
-	"sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
 )
 
 func TestNewCluster(t *testing.T) {
-	cluster := &v1beta1.Cluster{
+	cluster := &clusterv1.Cluster{
 		TypeMeta:   metav1.TypeMeta{},
 		ObjectMeta: metav1.ObjectMeta{},
-		Spec:       v1beta1.ClusterSpec{},
-		Status:     v1beta1.ClusterStatus{},
+		Spec:       clusterv1.ClusterSpec{},
+		Status:     clusterv1.ClusterStatus{},
 	}
 
 	maasCluster := &infrav1beta1.MaasCluster{

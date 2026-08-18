@@ -72,10 +72,10 @@ func (h *fakeVMHost) ResourcePool() maasclient.ResourcePool {
 	}
 	return h.pool
 }
-func (h *fakeVMHost) TotalCores() int   { return 0 }
-func (h *fakeVMHost) TotalMemory() int  { return 0 }
-func (h *fakeVMHost) UsedCores() int    { return 0 }
-func (h *fakeVMHost) UsedMemory() int   { return 0 }
+func (h *fakeVMHost) TotalCores() int  { return 0 }
+func (h *fakeVMHost) TotalMemory() int { return 0 }
+func (h *fakeVMHost) UsedCores() int   { return 0 }
+func (h *fakeVMHost) UsedMemory() int  { return 0 }
 func (h *fakeVMHost) AvailableCores() int {
 	if h.availableCores == 0 {
 		return 16 // default
