@@ -5,6 +5,8 @@ metadata:
   name: "${CLUSTER_NAME}"
 spec:
   dnsDomain: ${MAAS_DNS_DOMAIN}
+  # Optional: pin API server DNS attachments to an interface tag name (e.g. "control-plane").
+  # apiServerInterfaceTag: control-plane
 
 ---
 apiVersion: cluster.x-k8s.io/v1beta2

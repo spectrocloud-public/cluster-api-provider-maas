@@ -191,6 +191,9 @@ func TestMachine(t *testing.T) {
 			scope: &scope.MachineScope{
 				Logger:      log,
 				Cluster:     cluster,
+				ClusterScope: &scope.ClusterScope{
+					MaasCluster: &infrav1beta1.MaasCluster{},
+				},
 				MaasMachine: maasMachine,
 				Machine: &clusterv1.Machine{
 					Spec: clusterv1.MachineSpec{},
@@ -203,7 +206,7 @@ func TestMachine(t *testing.T) {
 		mockMachines.EXPECT().Machine("abc789").Return(mockMachine)
 		mockMachine.EXPECT().Get(context.TODO()).Return(mockMachine, nil)
 
-		mockMachine.EXPECT().SystemID().Times(4).Return("abc789")
+		mockMachine.EXPECT().SystemID().Times(5).Return("abc789")
 		mockMachine.EXPECT().Zone().AnyTimes().Return(mockZone)
 		mockZone.EXPECT().Name().Return("zone1")
 
@@ -299,6 +302,7 @@ func (c *captureNetworkInterface) Enabled() bool                                
 func (c *captureNetworkInterface) MACAddress() string                            { return "" }
 func (c *captureNetworkInterface) Links() []maasclient.NetworkInterfaceLink      { return nil }
 func (c *captureNetworkInterface) Children() []string                            { return nil }
+func (c *captureNetworkInterface) Tags() []string                                { return nil }
 func (c *captureNetworkInterface) VLAN() maasclient.VLAN                         { return nil }
 
 // fakeNetworkInterface is an in-memory NetworkInterface with a configurable name, ID, and links.
@@ -332,6 +336,7 @@ func (f *fakeNetworkInterface) Enabled() bool                                 { 
 func (f *fakeNetworkInterface) MACAddress() string                            { return "" }
 func (f *fakeNetworkInterface) Links() []maasclient.NetworkInterfaceLink      { return f.links }
 func (f *fakeNetworkInterface) Children() []string                            { return nil }
+func (f *fakeNetworkInterface) Tags() []string                                { return nil }
 func (f *fakeNetworkInterface) VLAN() maasclient.VLAN                         { return nil }
 
 // fakeNetworkInterfaceLink is a minimal NetworkInterfaceLink with a configurable subnet.

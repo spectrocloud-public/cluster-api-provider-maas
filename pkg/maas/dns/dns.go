@@ -2,6 +2,9 @@ package dns
 
 import (
 	"context"
+	"slices"
+	"sort"
+
 	"github.com/pkg/errors"
 	infrainfrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/scope"
@@ -116,6 +119,76 @@ func (s *Service) GetAPIServerDNSRecords() (sets.String, error) {
 	}
 
 	return ips, nil
+}
+
+// GetMachineIPForInterfaceTag returns a machine IP from the interface that
+// carries the provided MAAS tag. Returns an explicit error if multiple
+// interfaces share the same tag, to prevent ambiguous DNS entries.
+func (s *Service) GetMachineIPForInterfaceTag(systemID, interfaceTag string) (string, error) {
+	if systemID == "" {
+		return "", errors.New("systemID is required")
+	}
+	if interfaceTag == "" {
+		return "", errors.New("interfaceTag is required")
+	}
+
+	ctx := context.TODO()
+	interfaces, err := s.maasClient.NetworkInterfaces().Get(ctx, systemID)
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to list interfaces for machine %q", systemID)
+	}
+
+	var matched []maasclient.NetworkInterface
+	for _, iface := range interfaces {
+		if iface != nil && slices.Contains(iface.Tags(), interfaceTag) {
+			matched = append(matched, iface)
+		}
+	}
+
+	if len(matched) == 0 {
+		return "", errors.Errorf("no interface with tag %q found for machine %q", interfaceTag, systemID)
+	}
+
+	if len(matched) > 1 {
+		names := make([]string, len(matched))
+		for i, iface := range matched {
+			names[i] = iface.Name()
+		}
+		return "", errors.Errorf("tag %q is assigned to multiple interfaces %v on machine %q; each tag must be unique per machine", interfaceTag, names, systemID)
+	}
+
+	iface := matched[0]
+
+	// Build the list of candidate interfaces to check for IPs.
+	// When a physical NIC is bridged, MAAS moves its links to the bridge child,
+	// leaving the NIC with empty Links(). Follow Children() to handle that case.
+	candidates := []maasclient.NetworkInterface{iface}
+	for _, childName := range iface.Children() {
+		for _, candidate := range interfaces {
+			if candidate != nil && candidate.Name() == childName {
+				candidates = append(candidates, candidate)
+				break
+			}
+		}
+	}
+
+	for _, candidate := range candidates {
+		var ipv4s []string
+		for _, link := range candidate.Links() {
+			if link == nil {
+				continue
+			}
+			if ip := link.IPAddress(); ip != nil && ip.To4() != nil {
+				ipv4s = append(ipv4s, ip.String())
+			}
+		}
+		if len(ipv4s) > 0 {
+			sort.Strings(ipv4s)
+			return ipv4s[0], nil
+		}
+	}
+
+	return "", errors.Errorf("no IPv4 address found on interface %q or its children (tag %q) for machine %q", iface.Name(), interfaceTag, systemID)
 }
 
 func (s *Service) GetDNSResource() (maasclient.DNSResource, error) {
