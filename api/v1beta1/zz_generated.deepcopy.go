@@ -22,6 +22,7 @@ package v1beta1
 
 import (
 	"k8s.io/apimachinery/pkg/runtime"
+	corev1beta1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	"sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/errors"
 )
@@ -157,9 +158,9 @@ func (in *MaasClusterStatus) DeepCopyInto(out *MaasClusterStatus) {
 	out.Network = in.Network
 	if in.FailureDomains != nil {
 		in, out := &in.FailureDomains, &out.FailureDomains
-		*out = make([]v1beta2.FailureDomain, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
+		*out = make(corev1beta1.FailureDomains, len(*in))
+		for key, val := range *in {
+			(*out)[key] = *val.DeepCopy()
 		}
 	}
 	if in.Conditions != nil {
