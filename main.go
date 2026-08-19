@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	"sigs.k8s.io/cluster-api/controllers/clustercache"
+	"sigs.k8s.io/cluster-api/controllers/remote"
 
 	"github.com/spectrocloud/cluster-api-provider-maas/controllers"
 
@@ -156,18 +157,17 @@ func main() {
 		// In v1.13 (v1beta2), ClusterCacheTracker + ClusterCacheReconciler were unified into
 		// clustercache.SetupWithManager, which returns a ClusterCache interface directly.
 		//
-		// SecretClient uses GetAPIReader() (uncached direct-to-apiserver reader). The alternative,
-		// mgr.GetClient(), caches ALL secrets across ALL namespaces — a leak the clustercache docs
-		// explicitly warn against. GetAPIReader adds one apiserver call per Cluster reconcile to
-		// fetch the kubeconfig secret; not hot enough to justify a dedicated kubeconfig-only cache.
-		//
-		// NOTE on indexes: the old ClusterCacheTracker registered remote.NodeProviderIDIndex
-		// defensively. MAAS never queries Nodes by field-selector spec.providerID (grep for
-		// MatchingFields / NodeProviderIDField in this repo: nothing). Omitting the index avoids
-		// per-workload-cluster index-informer overhead. If MAAS ever needs a Node->Machine reverse
-		// lookup, add Cache.Indexes = []{clustercache.NodeProviderIDIndex} to the Options below.
+		// Match spectro-master's semantics: use mgr.GetClient() (cached) as the SecretClient and
+		// register NodeProviderIDIndex as the old ClusterCacheTracker did. UserAgent is a v1beta2
+		// hard requirement (cluster_cache.go validates it non-empty).
 		clusterCache, err := clustercache.SetupWithManager(ctx, mgr, clustercache.Options{
-			SecretClient: mgr.GetAPIReader(),
+			SecretClient: mgr.GetClient(),
+			Cache: clustercache.CacheOptions{
+				Indexes: []clustercache.CacheOptionsIndex{clustercache.NodeProviderIDIndex},
+			},
+			Client: clustercache.ClientOptions{
+				UserAgent: remote.DefaultClusterAPIUserAgent("cluster-api-provider-maas"),
+			},
 		}, concurrency(1))
 		if err != nil {
 			setupLog.Error(err, "unable to create cluster cache")

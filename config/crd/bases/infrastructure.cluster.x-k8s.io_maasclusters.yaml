@@ -173,12 +173,9 @@ spec:
                   type: object
                 type: array
               failureDomains:
-                description: |-
-                  FailureDomains don't mean much in CAPMAAS since it's all local, but we can see how the rest of cluster API
-                  will use this if we populate it.
-                items:
+                additionalProperties:
                   description: |-
-                    FailureDomain is the Schema for Cluster API failure domains.
+                    FailureDomainSpec is the Schema for Cluster API failure domains.
                     It allows controllers to understand how many failure domains a cluster can optionally span across.
                   properties:
                     attributes:
@@ -191,15 +188,15 @@ spec:
                       description: controlPlane determines if this failure domain
                         is suitable for use by control plane machines.
                       type: boolean
-                    name:
-                      description: name is the name of the failure domain.
-                      maxLength: 256
-                      minLength: 1
-                      type: string
-                  required:
-                  - name
                   type: object
-                type: array
+                description: |-
+                  FailureDomains don't mean much in CAPMAAS since it's all local, but we can see how the rest of cluster API
+                  will use this if we populate it. The map shape matches CAPI's v1beta1-contract expectation
+                  (contract.InfrastructureCluster().FailureDomains reads status.failureDomains as NestedMap when
+                  the CRD advertises the v1beta1 contract label) — same shape as CAPA/CAPG and the pre-upgrade
+                  spectro-master. Emitting []FailureDomain (v1beta2 shape) here would break CAPI's cluster
+                  reconciler with `[]interface{}, expected map[string]interface{}` on Cluster infrastructure sync.
+                type: object
               network:
                 description: Network represents the network
                 properties:

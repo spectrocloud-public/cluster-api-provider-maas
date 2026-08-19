@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clusterv1beta1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
@@ -103,8 +104,12 @@ type MaasClusterStatus struct {
 	Network Network `json:"network,omitempty"`
 
 	// FailureDomains don't mean much in CAPMAAS since it's all local, but we can see how the rest of cluster API
-	// will use this if we populate it.
-	FailureDomains []clusterv1.FailureDomain `json:"failureDomains,omitempty"`
+	// will use this if we populate it. The map shape matches CAPI's v1beta1-contract expectation
+	// (contract.InfrastructureCluster().FailureDomains reads status.failureDomains as NestedMap when
+	// the CRD advertises the v1beta1 contract label) — same shape as CAPA/CAPG and the pre-upgrade
+	// spectro-master. Emitting []FailureDomain (v1beta2 shape) here would break CAPI's cluster
+	// reconciler with `[]interface{}, expected map[string]interface{}` on Cluster infrastructure sync.
+	FailureDomains clusterv1beta1.FailureDomains `json:"failureDomains,omitempty"`
 
 	// Conditions defines current service state of the MaasCluster.
 	// +optional

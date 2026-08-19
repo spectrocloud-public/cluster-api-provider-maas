@@ -30,7 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
+	clusterv1beta1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	"sigs.k8s.io/cluster-api/util"
@@ -124,12 +124,17 @@ func (r *MaasClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Support FailureDomains
 	// In cloud providers this would likely look up which failure domains are supported and set the status appropriately.
 	// so kCP will distribute the CPs across multiple failure domains
-	failureDomains := []clusterv1.FailureDomain{}
+	//
+	// Emit as clusterv1beta1.FailureDomains (map keyed by domain name) to match CAPI's
+	// v1beta1-contract expectation — the CRD advertises `cluster.x-k8s.io/v1beta1: v1beta1`,
+	// so CAPI's cluster_controller_phases.go reads `status.failureDomains` via NestedMap.
+	// Emitting an array here breaks with `[]interface{}, expected map[string]interface{}`.
+	// Same shape as CAPA/CAPG and pre-upgrade spectro-master.
+	failureDomains := clusterv1beta1.FailureDomains{}
 	for _, az := range maasCluster.Spec.FailureDomains {
-		failureDomains = append(failureDomains, clusterv1.FailureDomain{
-			Name:         az,
-			ControlPlane: ptr.To(true),
-		})
+		failureDomains[az] = clusterv1beta1.FailureDomainSpec{
+			ControlPlane: true,
+		}
 	}
 	maasCluster.Status.FailureDomains = failureDomains
 
