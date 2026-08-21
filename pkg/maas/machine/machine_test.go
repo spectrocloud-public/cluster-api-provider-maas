@@ -191,6 +191,9 @@ func TestMachine(t *testing.T) {
 			scope: &scope.MachineScope{
 				Logger:      log,
 				Cluster:     cluster,
+				ClusterScope: &scope.ClusterScope{
+					MaasCluster: &infrav1beta1.MaasCluster{},
+				},
 				MaasMachine: maasMachine,
 				Machine: &clusterv1.Machine{
 					Spec: clusterv1.MachineSpec{},
@@ -203,7 +206,7 @@ func TestMachine(t *testing.T) {
 		mockMachines.EXPECT().Machine("abc789").Return(mockMachine)
 		mockMachine.EXPECT().Get(context.TODO()).Return(mockMachine, nil)
 
-		mockMachine.EXPECT().SystemID().Times(4).Return("abc789")
+		mockMachine.EXPECT().SystemID().Times(5).Return("abc789")
 		mockMachine.EXPECT().Zone().AnyTimes().Return(mockZone)
 		mockZone.EXPECT().Name().Return("zone1")
 
