@@ -116,9 +116,14 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 func (s *Service) ReleaseMachine(systemID string) error {
 	ctx := context.TODO()
 
+	// WithErase is required for MAAS to wipe disks; WithQuickErase selects a fast
+	// wipe (start/end of each disk) so leftover data (e.g. rook-ceph OSD signatures)
+	// does not block reuse on the next cluster deploy.
 	_, err := s.maasClient.Machines().
 		Machine(systemID).
 		Releaser().
+		WithErase().
+		WithQuickErase().
 		Release(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to release machine")
