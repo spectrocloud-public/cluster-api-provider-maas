@@ -302,6 +302,7 @@ func (c *captureNetworkInterface) Enabled() bool                                
 func (c *captureNetworkInterface) MACAddress() string                            { return "" }
 func (c *captureNetworkInterface) Links() []maasclient.NetworkInterfaceLink      { return nil }
 func (c *captureNetworkInterface) Children() []string                            { return nil }
+func (c *captureNetworkInterface) Tags() []string                                { return nil }
 func (c *captureNetworkInterface) VLAN() maasclient.VLAN                         { return nil }
 
 // fakeNetworkInterface is an in-memory NetworkInterface with a configurable name, ID, and links.
@@ -335,6 +336,7 @@ func (f *fakeNetworkInterface) Enabled() bool                                 { 
 func (f *fakeNetworkInterface) MACAddress() string                            { return "" }
 func (f *fakeNetworkInterface) Links() []maasclient.NetworkInterfaceLink      { return f.links }
 func (f *fakeNetworkInterface) Children() []string                            { return nil }
+func (f *fakeNetworkInterface) Tags() []string                                { return nil }
 func (f *fakeNetworkInterface) VLAN() maasclient.VLAN                         { return nil }
 
 // fakeNetworkInterfaceLink is a minimal NetworkInterfaceLink with a configurable subnet.

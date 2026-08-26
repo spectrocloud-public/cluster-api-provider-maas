@@ -247,7 +247,6 @@ func (mr *MockClientSetInterfaceMockRecorder) Zones() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Zones", reflect.TypeOf((*MockClientSetInterface)(nil).Zones))
 }
 
-
 // Subnets mocks base method.
 func (m *MockClientSetInterface) Subnets() maasclient.Subnets {
 	m.ctrl.T.Helper()

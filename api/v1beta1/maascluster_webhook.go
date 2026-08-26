@@ -61,6 +61,9 @@ func (r *MaasCluster) ValidateUpdate(_ context.Context, oldObj, newObj *MaasClus
 	if newObj.Spec.DNSDomain != oldObj.Spec.DNSDomain {
 		return nil, apierrors.NewBadRequest("changing cluster DNS Domain not allowed")
 	}
+	if newObj.Spec.APIServerInterfaceTag != oldObj.Spec.APIServerInterfaceTag {
+		return nil, apierrors.NewBadRequest("changing cluster APIServerInterfaceTag not allowed")
+	}
 	return nil, nil
 }
 
