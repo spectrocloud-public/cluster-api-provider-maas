@@ -39,7 +39,6 @@ jobs:
         run: |
           echo "LEGACY_REGISTRY=us-east1-docker.pkg.dev/spectro-images/dev/cluster-api-maas" >> $GITHUB_ENV
           echo "FIPS_REGISTRY=us-east1-docker.pkg.dev/spectro-images/dev-fips/cluster-api-maas" >> $GITHUB_ENV
-          echo "INIT_RELEASE_IMG=us-east1-docker.pkg.dev/spectro-images/dev/cluster-api/lxd-initializer" >> $GITHUB_ENV
 
       -
         uses: actions/checkout@v3
