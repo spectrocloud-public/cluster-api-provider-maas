@@ -109,7 +109,6 @@ func TestMachine(t *testing.T) {
 		mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
 		mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
 		mockMachineReleaser.EXPECT().WithErase().Return(mockMachineReleaser)
-		mockMachineReleaser.EXPECT().WithQuickErase().Return(mockMachineReleaser)
 		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
 
 		err := s.ReleaseMachine("abc123")
