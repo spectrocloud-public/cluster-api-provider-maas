@@ -26,7 +26,7 @@ endif
 # Image URL to use all building/pushing image targets
 IMAGE_NAME := cluster-api-provider-maas-controller
 REGISTRY ?= "us-east1-docker.pkg.dev/spectro-images/dev/${USER}/cluster-api"
-SPECTRO_VERSION ?= storage-overcommit-prevention-20260506
+SPECTRO_VERSION ?= latest
 IMG_TAG ?= v0.6.1-spectro-${SPECTRO_VERSION}
 CONTROLLER_IMG ?= ${REGISTRY}/${IMAGE_NAME}
 
@@ -219,77 +219,51 @@ version: ## Prints version of current make
 
 # --------------------------------------------------------------------
 # LXD-initializer image (privileged DaemonSet)
+# Shares REGISTRY and IMG_TAG with the controller so both images always
+# land on the same registry and carry the same tag per release.
 # --------------------------------------------------------------------
-INIT_IMAGE_NAME ?= "lxd-initializer"
-INIT_IMG_TAG    ?= $(IMG_TAG)          # reuse the same tag as controller
-INIT_DRI_IMG    ?= us-east1-docker.pkg.dev/spectro-images/dev/$(USER)/cluster-api/$(INIT_IMAGE_NAME)
-# Release image for LXD initializer (without tag)
-INIT_RELEASE_IMG ?= us-east1-docker.pkg.dev/spectro-images/dev/cluster-api/$(INIT_IMAGE_NAME)
+INIT_IMAGE_NAME ?= lxd-initializer
+INIT_IMG        ?= $(REGISTRY)/$(INIT_IMAGE_NAME)
+INIT_IMG_TAG    ?= $(IMG_TAG)
 
 .PHONY: lxd-initializer-docker-build
 lxd-initializer-docker-build: generate-lxd-template ## Build LXD initializer image (ensures template is processed first)
-	@# Determine image to build: use INIT_DRI_IMG if explicitly set, otherwise use INIT_RELEASE_IMG for release
-	@if [ -n "$(VERSION)" ] && [ "$(STAGE)" = "release" ]; then \
-		BUILD_IMG="$(INIT_RELEASE_IMG):$(VERSION)"; \
-	else \
-		BUILD_IMG="$(INIT_DRI_IMG):$(INIT_IMG_TAG)"; \
-	fi; \
-	echo "Building LXD initializer image: $$BUILD_IMG"; \
+	echo "Building LXD initializer image: $(INIT_IMG):$(INIT_IMG_TAG)"
 	docker buildx build --load --platform linux/$(ARCH) \
 	    -f lxd-initializer/Dockerfile \
 	    ${BUILD_ARGS} \
-	    lxd-initializer -t $$BUILD_IMG
+	    lxd-initializer -t $(INIT_IMG):$(INIT_IMG_TAG)
 
 .PHONY: lxd-initializer-docker-push
 lxd-initializer-docker-push: lxd-initializer-docker-build ## Push LXD initializer image (builds first if needed)
-	@# Determine image to push: use INIT_DRI_IMG if explicitly set, otherwise use INIT_RELEASE_IMG for release
-	@if [ -n "$(VERSION)" ] && [ "$(STAGE)" = "release" ]; then \
-		PUSH_IMG="$(INIT_RELEASE_IMG):$(VERSION)"; \
-	else \
-		PUSH_IMG="$(INIT_DRI_IMG):$(INIT_IMG_TAG)"; \
-	fi; \
-	echo "Pushing LXD initializer image: $$PUSH_IMG"; \
-	docker push $$PUSH_IMG
+	echo "Pushing LXD initializer image: $(INIT_IMG):$(INIT_IMG_TAG)"
+	docker push $(INIT_IMG):$(INIT_IMG_TAG)
 
-# File target for processed template - ensures it exists before Go compilation
-# This file target ensures the processed template exists, making it a proper dependency
-controllers/templates/lxd_initializer_ds.yaml.processed: controllers/templates/lxd_initializer_ds.yaml
-	@$(MAKE) process-lxd-initializer-template
-
+# process-lxd-initializer-template runs on every generate-lxd-template so
+# that back-to-back builds under different REGISTRY values (release + FIPS
+# in the same CI job) each regenerate the embedded URL. Cheap in the
+# steady state because the recipe short-circuits when the file already
+# contains the target URL.
+.PHONY: process-lxd-initializer-template
 process-lxd-initializer-template: ## Process LXD initializer template with image substitution using envsubst
 	@# Check if envsubst is available
 	@command -v envsubst >/dev/null 2>&1 || { echo "ERROR: envsubst not found. Please install gettext package."; exit 1; }
-	@# Determine which image to use (dev or release) and check if already processed
-	@if [ -n "$(VERSION)" ] && [ "$(STAGE)" = "release" ]; then \
-		INIT_IMG="$(INIT_RELEASE_IMG):$(VERSION)"; \
-	else \
-		INIT_IMG="$(INIT_DRI_IMG):$(INIT_IMG_TAG)"; \
+	@INIT_IMG_FULL="$(INIT_IMG):$(INIT_IMG_TAG)"; \
+	if [ -f controllers/templates/lxd_initializer_ds.yaml.processed ] && \
+	   grep -q "$$INIT_IMG_FULL" controllers/templates/lxd_initializer_ds.yaml.processed; then \
+		echo "Template already processed with image: $$INIT_IMG_FULL (skipping)"; \
+		exit 0; \
 	fi; \
-	if [ -f controllers/templates/lxd_initializer_ds.yaml.processed ]; then \
-		if grep -q "$$INIT_IMG" controllers/templates/lxd_initializer_ds.yaml.processed; then \
-			echo "Template already processed with image: $$INIT_IMG (skipping)"; \
-			exit 0; \
-		fi; \
-	fi; \
-	echo "Processing LXD initializer template with image: $$INIT_IMG"; \
-	LXD_INITIALIZER_IMAGE=$$INIT_IMG envsubst '$$LXD_INITIALIZER_IMAGE' \
-		< controllers/templates/lxd_initializer_ds.yaml > controllers/templates/lxd_initializer_ds.yaml.processed
-	@# Verify the image was substituted
-	@if [ -n "$(VERSION)" ] && [ "$(STAGE)" = "release" ]; then \
-		VERIFY_IMG="$(INIT_RELEASE_IMG):$(VERSION)"; \
-	else \
-		VERIFY_IMG="$(INIT_DRI_IMG):$(INIT_IMG_TAG)"; \
-	fi; \
-	if ! grep -q "$$VERIFY_IMG" controllers/templates/lxd_initializer_ds.yaml.processed; then \
-		if grep -q "\$${LXD_INITIALIZER_IMAGE}" controllers/templates/lxd_initializer_ds.yaml.processed; then \
-			echo "ERROR: Image substitution failed! Still contains placeholder '\$${LXD_INITIALIZER_IMAGE}'"; \
-			echo "Expected image: $$VERIFY_IMG"; \
-			exit 1; \
-		fi; \
+	echo "Processing LXD initializer template with image: $$INIT_IMG_FULL"; \
+	LXD_INITIALIZER_IMAGE="$$INIT_IMG_FULL" envsubst '$$LXD_INITIALIZER_IMAGE' \
+		< controllers/templates/lxd_initializer_ds.yaml > controllers/templates/lxd_initializer_ds.yaml.processed; \
+	if grep -q "\$${LXD_INITIALIZER_IMAGE}" controllers/templates/lxd_initializer_ds.yaml.processed; then \
+		echo "ERROR: Image substitution failed! Still contains placeholder '\$${LXD_INITIALIZER_IMAGE}'"; \
+		exit 1; \
 	fi
 
 .PHONY: generate-lxd-template
-generate-lxd-template: controllers/templates/lxd_initializer_ds.yaml.processed ## Generate processed LXD initializer template for embedding
+generate-lxd-template: process-lxd-initializer-template ## Generate processed LXD initializer template for embedding
 	@# Ensure processed file exists (required for go:embed)
 	@if [ ! -f controllers/templates/lxd_initializer_ds.yaml.processed ]; then \
 		echo "ERROR: Processed template not found"; \
