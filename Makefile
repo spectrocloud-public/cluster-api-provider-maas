@@ -26,7 +26,7 @@ endif
 # Image URL to use all building/pushing image targets
 IMAGE_NAME := cluster-api-provider-maas-controller
 REGISTRY ?= "us-east1-docker.pkg.dev/spectro-images/dev/${USER}/cluster-api"
-SPECTRO_VERSION ?= latest
+SPECTRO_VERSION c?= latest
 IMG_TAG ?= v0.6.1-spectro-${SPECTRO_VERSION}
 CONTROLLER_IMG ?= ${REGISTRY}/${IMAGE_NAME}
 
@@ -239,11 +239,12 @@ lxd-initializer-docker-push: lxd-initializer-docker-build ## Push LXD initialize
 	echo "Pushing LXD initializer image: $(INIT_IMG):$(INIT_IMG_TAG)"
 	docker push $(INIT_IMG):$(INIT_IMG_TAG)
 
-# File target for processed template - ensures it exists before Go compilation
-# This file target ensures the processed template exists, making it a proper dependency
-controllers/templates/lxd_initializer_ds.yaml.processed: controllers/templates/lxd_initializer_ds.yaml
-	@$(MAKE) process-lxd-initializer-template
-
+# process-lxd-initializer-template runs on every generate-lxd-template so
+# that back-to-back builds under different REGISTRY values (release + FIPS
+# in the same CI job) each regenerate the embedded URL. Cheap in the
+# steady state because the recipe short-circuits when the file already
+# contains the target URL.
+.PHONY: process-lxd-initializer-template
 process-lxd-initializer-template: ## Process LXD initializer template with image substitution using envsubst
 	@# Check if envsubst is available
 	@command -v envsubst >/dev/null 2>&1 || { echo "ERROR: envsubst not found. Please install gettext package."; exit 1; }
@@ -262,7 +263,7 @@ process-lxd-initializer-template: ## Process LXD initializer template with image
 	fi
 
 .PHONY: generate-lxd-template
-generate-lxd-template: controllers/templates/lxd_initializer_ds.yaml.processed ## Generate processed LXD initializer template for embedding
+generate-lxd-template: process-lxd-initializer-template ## Generate processed LXD initializer template for embedding
 	@# Ensure processed file exists (required for go:embed)
 	@if [ ! -f controllers/templates/lxd_initializer_ds.yaml.processed ]; then \
 		echo "ERROR: Processed template not found"; \
