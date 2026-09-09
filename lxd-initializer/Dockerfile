@@ -1,5 +1,5 @@
 # Build the manager binary
-ARG BUILDER_GOLANG_VERSION=1.23
+ARG BUILDER_GOLANG_VERSION=1.26.7
 # First stage: build the executable.
 FROM us-central1-docker.pkg.dev/palette-images-dev/hardened-images/builder/golang:${BUILDER_GOLANG_VERSION}-alpine AS toolchain
 
