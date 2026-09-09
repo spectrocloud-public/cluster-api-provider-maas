@@ -1,5 +1,5 @@
 # Build the manager binary
-ARG BUILDER_GOLANG_VERSION=1.23
+ARG BUILDER_GOLANG_VERSION=1.26.7
 # First stage: build the executable.
 FROM us-central1-docker.pkg.dev/palette-images-dev/hardened-images/builder/golang:${BUILDER_GOLANG_VERSION}-alpine AS toolchain
 
@@ -25,10 +25,20 @@ COPY *.go ./
 
 # Build the binary (respect multi-arch via Docker BuildKit target arch)
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o lxd-initializer .
+ARG CRYPTO_LIB
+ENV GOEXPERIMENT=${CRYPTO_LIB:+boringcrypto}
+RUN if [ "${CRYPTO_LIB}" ]; then \
+      GOARCH=${TARGETARCH} go-build-fips.sh -a -o lxd-initializer . ; \
+    else \
+      GOARCH=${TARGETARCH} go-build-static.sh -a -o lxd-initializer . ; \
+    fi
+
+RUN if [ "${CRYPTO_LIB}" ]; then assert-static.sh lxd-initializer; fi
+RUN if [ "${CRYPTO_LIB}" ]; then assert-fips.sh lxd-initializer; fi
+RUN scan-govulncheck.sh lxd-initializer
 
 # Create final image
-FROM alpine:3.19
+FROM alpine:3.22
 
 # Install runtime dependencies
 RUN apk add --no-cache lxc curl jq
@@ -37,4 +47,4 @@ RUN apk add --no-cache lxc curl jq
 COPY --from=builder /workspace/lxd-initializer /lxd-initializer
 
 # Set the entrypoint
-ENTRYPOINT ["/lxd-initializer"] 
+ENTRYPOINT ["/lxd-initializer"]
