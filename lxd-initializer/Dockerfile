@@ -28,7 +28,7 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o lxd-initializer .
 
 # Create final image
-FROM alpine:3.22
+FROM alpine:3.19
 
 # Install runtime dependencies
 RUN apk add --no-cache lxc curl jq
