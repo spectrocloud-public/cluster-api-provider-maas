@@ -27,7 +27,8 @@ endif
 IMAGE_NAME := cluster-api-provider-maas-controller
 REGISTRY ?= "us-east1-docker.pkg.dev/spectro-images/dev/${USER}/cluster-api"
 SPECTRO_VERSION ?= storage-overcommit-prevention-20260506
-IMG_TAG ?= v0.6.1-spectro-${SPECTRO_VERSION}
+TAG ?= v0.6.1-spectro-${SPECTRO_VERSION}
+IMG_TAG ?= $(TAG)
 CONTROLLER_IMG ?= ${REGISTRY}/${IMAGE_NAME}
 
 # Set --output-base for conversion-gen if we are not within GOPATH
@@ -215,7 +216,7 @@ templates: ## Generate release templates
 	cp templates/cluster-template*.yaml $(OUTPUT_DIR)/
 
 version: ## Prints version of current make
-	@echo $(VERSION)
+	@echo $(TAG)
 
 # --------------------------------------------------------------------
 # LXD-initializer image (privileged DaemonSet)
