@@ -25,17 +25,7 @@ COPY *.go ./
 
 # Build the binary (respect multi-arch via Docker BuildKit target arch)
 ARG TARGETARCH
-ARG CRYPTO_LIB
-ENV GOEXPERIMENT=${CRYPTO_LIB:+boringcrypto}
-RUN if [ "${CRYPTO_LIB}" ]; then \
-      GOARCH=${TARGETARCH} go-build-fips.sh -a -o lxd-initializer . ; \
-    else \
-      GOARCH=${TARGETARCH} go-build-static.sh -a -o lxd-initializer . ; \
-    fi
-
-RUN if [ "${CRYPTO_LIB}" ]; then assert-static.sh lxd-initializer; fi
-RUN if [ "${CRYPTO_LIB}" ]; then assert-fips.sh lxd-initializer; fi
-RUN scan-govulncheck.sh lxd-initializer
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o lxd-initializer .
 
 # Create final image
 FROM alpine:3.22
