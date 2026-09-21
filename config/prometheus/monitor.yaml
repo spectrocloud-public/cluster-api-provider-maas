@@ -10,7 +10,12 @@ metadata:
 spec:
   endpoints:
     - path: /metrics
-      port: https
+      port: metrics
+      # The endpoint requires a bearer token and serves a self-signed certificate.
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
   selector:
     matchLabels:
       control-plane: controller-manager
