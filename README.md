@@ -30,6 +30,20 @@ make deploy
 make test
 ```
 
+### Diagnostics and profiling
+
+The manager serves metrics, `pprof` and a live log-level endpoint from one TLS diagnostics
+endpoint (`--diagnostics-address`, default `:8443`), authorised per request via
+TokenReview/SubjectAccessReview. `--metrics-bind-addr` is deprecated and ignored.
+
+The serving certificate is self-signed and localhost-only, so every scraper and every
+`curl` must skip TLS verification (`-k`, or `insecureSkipVerify: true`).
+`--tls-min-version` and `--tls-cipher-suites` apply to this endpoint and to the webhook
+server.
+
+See [docs/diagnostics.md](docs/diagnostics.md) for the flag reference, the collector RBAC
+(documented, not shipped) and the heap/goroutine collection runbook.
+
 ## LXD Integration
 
 This provider supports dynamic LXD VM creation for workload clusters. This involves two main stages:
