@@ -265,9 +265,10 @@ metadata:
   namespace: cluster-api-provider-maas-system
 spec:
   ports:
-  - name: https
+  - name: metrics
     port: 8443
-    targetPort: https
+    protocol: TCP
+    targetPort: metrics
   selector:
     control-plane: capmaas-controller-manager
 ---
@@ -307,6 +308,10 @@ spec:
         image: gcr.io/spectro-images-public/release/cluster-api-provider-maas:latest
         imagePullPolicy: IfNotPresent
         name: manager
+        ports:
+        - containerPort: 8443
+          name: metrics
+          protocol: TCP
         resources:
           limits:
             cpu: 200m

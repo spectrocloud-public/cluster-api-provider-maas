@@ -27,10 +27,10 @@ patchesStrategicMerge:
 - manager_credentials_patch.yaml
 - manager_pull_policy.yaml
 - manager_image_patch.yaml
-  # Protect the /metrics endpoint by putting it behind auth.
-  # If you want your controller-manager to expose the /metrics
-  # endpoint w/o any authn/z, please comment the following line.
-- manager_auth_proxy_patch.yaml
+  # The /metrics and /debug/pprof endpoints are protected in-process by the manager's
+  # diagnostics server (TokenReview + SubjectAccessReview on --diagnostics-address).
+  # The kube-rbac-proxy sidecar patch was removed: it bound the same :8443 in the pod
+  # network namespace and upstreamed to a :8080 the manager no longer serves.
   # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
   # crd/kustomization.yaml
 - manager_webhook_patch.yaml
