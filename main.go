@@ -38,12 +38,12 @@ import (
 	"k8s.io/klog/v2"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/feature"
+	"sigs.k8s.io/cluster-api/util/flags"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
 	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 	// +kubebuilder:scaffold:imports
 )
@@ -53,7 +53,9 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 
 	//flags
+	// metricsBindAddr backs the deprecated, ignored --metrics-bind-addr flag.
 	metricsBindAddr      string
+	managerOptions       flags.ManagerOptions
 	enableLeaderElection bool
 	syncPeriod           time.Duration
 	machineConcurrency   int
@@ -99,11 +101,21 @@ func main() {
 		setupLog.Info("Watching cluster-api objects only in namespace for reconciliation", "namespace", watchNamespace)
 	}
 
+	// Metrics and pprof are served on --diagnostics-address (default :8443), authenticated with
+	// TokenReview/SubjectAccessReview unless --insecure-diagnostics is set.
+	tlsOpts, metricsOpts, err := flags.GetManagerOptions(managerOptions)
+	if err != nil {
+		setupLog.Error(err, "unable to configure diagnostics options")
+		os.Exit(1)
+	}
+	if metricsBindAddr != "" {
+		setupLog.Info("--metrics-bind-addr is deprecated and ignored; use --diagnostics-address",
+			"ignored", metricsBindAddr)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
-		Metrics: metricsserver.Options{
-			BindAddress: metricsBindAddr,
-		},
+		Scheme:           scheme,
+		Metrics:          *metricsOpts,
 		LeaderElection:   enableLeaderElection,
 		LeaderElectionID: "controller-leader-election-capmaas",
 		Cache: cache.Options{
@@ -114,7 +126,8 @@ func main() {
 		},
 		HealthProbeBindAddress: healthAddr,
 		WebhookServer: webhookserver.NewServer(webhookserver.Options{
-			Port: webhookPort,
+			Port:    webhookPort,
+			TLSOpts: tlsOpts,
 		}),
 	})
 	if err != nil {
@@ -248,8 +261,10 @@ func main() {
 }
 
 func initFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&metricsBindAddr, "metrics-bind-addr", ":8080",
-		"The address the metric endpoint binds to.")
+	fs.StringVar(&metricsBindAddr, "metrics-bind-addr", "",
+		"Deprecated, ignored: use --diagnostics-address.")
+	_ = fs.MarkDeprecated("metrics-bind-addr", "use --diagnostics-address instead")
+	flags.AddManagerOptions(fs, &managerOptions)
 	fs.IntVar(&machineConcurrency, "machine-concurrency", 2,
 		"The number of maas machines to process simultaneously")
 	fs.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -269,6 +284,10 @@ func initFlags(fs *pflag.FlagSet) {
 
 	feature.MutableGates.AddFlag(fs)
 }
+
+// Add RBAC for the authorized diagnostics endpoint.
+// +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
+// +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 
 func concurrency(c int) controller.Options {
 	return controller.Options{MaxConcurrentReconciles: c}
