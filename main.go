@@ -37,12 +37,12 @@ import (
 	"k8s.io/klog/v2"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/feature"
+	"sigs.k8s.io/cluster-api/util/flags"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
 	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 	// +kubebuilder:scaffold:imports
 )
@@ -52,7 +52,10 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 
 	//flags
+	// metricsBindAddr backs the deprecated --metrics-bind-addr flag. It is parsed and
+	// ignored so existing deployments passing the flag keep starting; use --diagnostics-address.
 	metricsBindAddr      string
+	managerOptions       flags.ManagerOptions
 	enableLeaderElection bool
 	syncPeriod           time.Duration
 	machineConcurrency   int
@@ -98,11 +101,23 @@ func main() {
 		setupLog.Info("Watching cluster-api objects only in namespace for reconciliation", "namespace", watchNamespace)
 	}
 
+	// Diagnostics endpoint (metrics + pprof + /debug/flags/v) served on --diagnostics-address
+	// (default :8443). Unless --insecure-diagnostics is set it serves HTTPS and authorises every
+	// request with TokenReview/SubjectAccessReview, and only in that secure mode are the pprof
+	// handlers mounted. The returned tlsOpts are shared with the webhook server.
+	tlsOpts, metricsOpts, err := flags.GetManagerOptions(managerOptions)
+	if err != nil {
+		setupLog.Error(err, "unable to configure diagnostics options")
+		os.Exit(1)
+	}
+	if metricsBindAddr != "" {
+		setupLog.Info("--metrics-bind-addr is deprecated and ignored; use --diagnostics-address",
+			"ignored", metricsBindAddr)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
-		Metrics: metricsserver.Options{
-			BindAddress: metricsBindAddr,
-		},
+		Scheme:           scheme,
+		Metrics:          *metricsOpts,
 		LeaderElection:   enableLeaderElection,
 		LeaderElectionID: "controller-leader-election-capmaas",
 		Cache: cache.Options{
@@ -113,7 +128,8 @@ func main() {
 		},
 		HealthProbeBindAddress: healthAddr,
 		WebhookServer: webhookserver.NewServer(webhookserver.Options{
-			Port: webhookPort,
+			Port:    webhookPort,
+			TLSOpts: tlsOpts,
 		}),
 	})
 	if err != nil {
@@ -236,8 +252,10 @@ func main() {
 }
 
 func initFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&metricsBindAddr, "metrics-bind-addr", ":8080",
-		"The address the metric endpoint binds to.")
+	fs.StringVar(&metricsBindAddr, "metrics-bind-addr", "",
+		"Deprecated, ignored: use --diagnostics-address.")
+	_ = fs.MarkDeprecated("metrics-bind-addr", "use --diagnostics-address instead")
+	flags.AddManagerOptions(fs, &managerOptions)
 	fs.IntVar(&machineConcurrency, "machine-concurrency", 2,
 		"The number of maas machines to process simultaneously")
 	fs.BoolVar(&enableLeaderElection, "leader-elect", false,
