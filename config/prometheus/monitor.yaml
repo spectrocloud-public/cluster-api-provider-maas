@@ -10,7 +10,17 @@ metadata:
 spec:
   endpoints:
     - path: /metrics
-      port: https
+      # Matches the Service port name in config/rbac/auth_proxy_service.yaml, which in turn
+      # targets the container port named "metrics" on :8443.
+      port: metrics
+      # The manager's diagnostics endpoint is HTTPS and authorises every request with a
+      # TokenReview + SubjectAccessReview, so Prometheus must present its own SA token.
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        # controller-runtime generates a self-signed certificate for the diagnostics
+        # endpoint, valid for localhost only, so the scrape cannot verify it.
+        insecureSkipVerify: true
   selector:
     matchLabels:
       control-plane: controller-manager
