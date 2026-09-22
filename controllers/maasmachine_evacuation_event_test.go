@@ -48,7 +48,8 @@ func TestReconcileDeleteWarnsEvacuationControllerMissing(t *testing.T) {
 	events := drainEvents(rec)
 	g.Expect(events).To(HaveLen(1),
 		"dropping the orphaned evacuation finalizer must warn exactly once")
-	g.Expect(events[0]).To(ContainSubstring("EvacuationControllerMissing"))
+	g.Expect(events[0]).To(ContainSubstring("Warning EvacuationControllerMissing"),
+		"the event must be Warning severity — operators alert on Warning events; a Normal one would be invisible to them (PCP-7660)")
 	g.Expect(events[0]).To(ContainSubstring("releasing host without evacuation"))
 }
 
