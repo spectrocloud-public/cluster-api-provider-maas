@@ -175,10 +175,14 @@ func main() {
 		}
 
 		if err := (&controllers.MaasMachineReconciler{
-			Client:   mgr.GetClient(),
-			Log:      ctrl.Log.WithName("controllers").WithName("MaasMachine"),
-			Recorder: mgr.GetEventRecorderFor("maasmachine-controller"),
-			Tracker:  clusterCache,
+			Client: mgr.GetClient(),
+			Log:    ctrl.Log.WithName("controllers").WithName("MaasMachine"),
+			// HMC is registered further below only when --cluster-role=hcp; the
+			// MaasMachine controller must agree so the evacuation finalizer is
+			// only added/kept when its owner is deployed (PCP-7660).
+			HMCEnabled: clusterRole == HCPClusterRoleValue,
+			Recorder:   mgr.GetEventRecorderFor("maasmachine-controller"),
+			Tracker:    clusterCache,
 		}).SetupWithManager(ctx, mgr, concurrency(machineConcurrency)); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "MaasMachine")
 			os.Exit(1)

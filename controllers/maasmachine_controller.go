@@ -64,6 +64,12 @@ type MaasMachineReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Tracker  clustercache.ClusterCache
+	// HMCEnabled reports whether the HMC host-evacuation controller is deployed
+	// in this process (main.go sets it when --cluster-role=hcp). HMC is the only
+	// component that clears HostEvacuationFinalizer, so the finalizer must only
+	// be added — and only be honored — when that owner is actually running
+	// (PCP-7660: an ownerless finalizer deadlocks every host deletion).
+	HMCEnabled bool
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=maasmachines,verbs=get;list;watch;create;update;patch;delete
@@ -185,10 +191,23 @@ func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope 
 			return ctrl.Result{}, nil
 		}
 
-		// Log using Spec.SystemID directly to avoid providerID parse errors
-		machineScope.Info("Host evacuation finalizer present, requeuing for HMC controller to handle evacuation",
-			"systemID", *maasMachine.Spec.SystemID)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		// HMC is the only owner of HostEvacuationFinalizer. If it is not deployed
+		// in this process, nothing will ever clear the finalizer: fall through to
+		// the regular release path (which unregisters the LXD VM host and deletes
+		// guest VMs) instead of deadlocking the deletion (PCP-7660).
+		if !r.HMCEnabled {
+			machineScope.Info("Evacuation finalizer present but HMC controller is not deployed (--cluster-role != hcp); removing it to unblock deletion",
+				"systemID", *maasMachine.Spec.SystemID)
+			r.Recorder.Eventf(maasMachine, corev1.EventTypeWarning, "EvacuationControllerMissing",
+				"Host evacuation skipped: HMC controller is not deployed in this capmaas deployment (--cluster-role != hcp); releasing host without evacuation")
+			controllerutil.RemoveFinalizer(maasMachine, HostEvacuationFinalizer)
+			// Fall through to the normal delete flow below.
+		} else {
+			// Log using Spec.SystemID directly to avoid providerID parse errors
+			machineScope.Info("Host evacuation finalizer present, requeuing for HMC controller to handle evacuation",
+				"systemID", *maasMachine.Spec.SystemID)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
 	}
 
 	machineSvc := maasmachine.NewService(machineScope)
@@ -395,10 +414,12 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 	// This ensures VMs are evacuated before the host is deleted
 	// This must be done BEFORE the machine starts being deleted, otherwise Kubernetes
 	// will reject the finalizer addition with "no new finalizers can be added if the object is being deleted"
+	// Only add it when the HMC controller (its only remover) is deployed in this process;
+	// an ownerless finalizer would block the machine's deletion forever (PCP-7660).
 	isHostMachine := maasMachine.Spec.Parent == nil || *maasMachine.Spec.Parent == ""
 	isHCPCluster := clusterScope.IsLXDHostEnabled()
 
-	if isHostMachine && isHCPCluster && !controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
+	if r.HMCEnabled && isHostMachine && isHCPCluster && !controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
 		machineScope.Info("Adding evacuation finalizer to host machine in HCP cluster")
 		controllerutil.AddFinalizer(maasMachine, HostEvacuationFinalizer)
 		return ctrl.Result{}, nil
