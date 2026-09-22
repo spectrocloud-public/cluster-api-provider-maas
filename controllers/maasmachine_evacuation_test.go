@@ -11,6 +11,7 @@ import (
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2/klogr"
+	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -50,7 +51,7 @@ func evacuationTestMachine(name string, deleting bool, parent *string, evacuatio
 		},
 		Spec: infrav1beta1.MaasMachineSpec{
 			Parent:   parent,
-			SystemID: strPtr("abc123"),
+			SystemID: ptr.To("abc123"),
 		},
 	}
 	if deleting {
@@ -59,8 +60,6 @@ func evacuationTestMachine(name string, deleting bool, parent *string, evacuatio
 	}
 	return m
 }
-
-func strPtr(s string) *string { return &s }
 
 func lxdEnabledCluster(enabled bool) *infrav1beta1.MaasCluster {
 	return &infrav1beta1.MaasCluster{
@@ -170,6 +169,8 @@ func TestReconcileDeleteDropsOrphanedEvacuationFinalizer(t *testing.T) {
 	}
 	_, err := r.reconcileDelete(context.Background(), ms, ms.ClusterScope)
 	g.Expect(err).ToNot(HaveOccurred())
+	// reconcileDelete only drops the finalizer in the scope's patch set; the
+	// deferred Close() in Reconcile is what persists it in production.
 	g.Expect(ms.Close()).To(Succeed())
 
 	updated := &infrav1beta1.MaasMachine{}
