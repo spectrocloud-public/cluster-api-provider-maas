@@ -129,7 +129,9 @@ func (r *VMEvacuationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Step 2: If there's any active session, wait (only one CP maintenance at a time)
+	// Step 2: If there's any active session, wait for its replacement VM to be provisioned,
+	// then tag it and complete the session (only one CP maintenance at a time). A session
+	// stranded before its eviction ever ran is re-driven through Step 3/4 below (PCP-7660).
 	if len(activeSessions) > 0 {
 		// Get the first active session
 		var activeOpID string
@@ -154,8 +156,47 @@ func (r *VMEvacuationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 
 		// KCP is stable - tag replacement VM with ready-op and complete session
-		if err := r.tagReplacementVMAndCompleteSession(ctx, maasClient, cluster, activeOpID, log); err != nil {
+		provisioned, err := r.tagReplacementVMAndCompleteSession(ctx, maasClient, cluster, activeOpID, log)
+		if err != nil {
 			log.Error(err, "failed to tag replacement VM and complete session", "opID", activeOpID)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if provisioned {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
+		// PCP-7660: the session is created before the stability gates, so a failed gate
+		// strands it Active with no replacement ever provisioned — only Step 3/4 deletes
+		// the CP machine whose replacement writes newVMSystemID, and Step 3/4 never runs
+		// while a session is Active. Detect the stranded state (KCP stable, no replacement,
+		// the triggering CP machine still undeleted on the session host, no other CP
+		// eviction in flight) and drop the session so the next reconcile re-enters Step 3/4.
+		sessionCM := &corev1.ConfigMap{}
+		sessionKey := types.NamespacedName{Namespace: cluster.Namespace, Name: getMaintenanceConfigMapName(activeOpID)}
+		if err := r.Get(ctx, sessionKey, sessionCM); err != nil {
+			log.Error(err, "failed to get maintenance session ConfigMap", "opID", activeOpID)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		sessionHost := sessionCM.Data[maintenance.CmKeyCurrentHost]
+		cpMachines, err := r.findCPMachinesOnMaintenanceHosts(ctx, maasClient, cluster, cluster.Namespace, log)
+		if err != nil {
+			log.Error(err, "failed to find CP machines on maintenance hosts")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		for _, cpInfo := range cpMachines {
+			if cpInfo.HostSystemID != sessionHost || !cpInfo.Machine.DeletionTimestamp.IsZero() {
+				continue
+			}
+			if r.hasOtherCPBeingDeleted(ctx, cluster, cpInfo.Machine, log) {
+				// another CP eviction is in flight; keep the session and wait
+				break
+			}
+			log.Info("Stranded maintenance session: replacement never provisioned and the CP machine is still on the maintenance host; dropping session to re-drive eviction",
+				"opID", activeOpID, "host", sessionHost, "machine", cpInfo.Machine.Name)
+			if err := r.Delete(ctx, sessionCM); err != nil && !apierrors.IsNotFound(err) {
+				log.Error(err, "failed to delete stranded maintenance session ConfigMap", "opID", activeOpID)
+			}
+			break
 		}
 
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -199,6 +240,14 @@ func (r *VMEvacuationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Check if another CP is being deleted
 	if r.hasOtherCPBeingDeleted(ctx, cluster, cpInfo.Machine, log) {
 		log.Info("Another CP is being deleted, waiting")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Claim the session only now, when the eviction is about to run: creating it earlier
+	// (before the stability gates) strands it Active whenever a gate fails, and Step 2
+	// then waits forever for a replacement this reconcile never started. PCP-7660.
+	if err := r.saveMaintenanceSession(ctx, cluster.Namespace, cpInfo.OpID, cpInfo.HostSystemID, string(maintenance.StatusActive)); err != nil {
+		log.Error(err, "failed to save maintenance session ConfigMap", "opID", cpInfo.OpID)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -256,8 +305,9 @@ type cpMachineOnMaintenanceHost struct {
 	OpID         string
 }
 
-// findCPMachinesOnMaintenanceHosts finds all CP Machines in this cluster whose LXD hosts are under maintenance
-// and creates ConfigMaps to track the maintenance sessions
+// findCPMachinesOnMaintenanceHosts finds all CP Machines in this cluster whose LXD hosts are under
+// maintenance. It does NOT create session ConfigMaps — the caller claims a session only once the
+// stability gates pass and the eviction is about to run (PCP-7660).
 func (r *VMEvacuationReconciler) findCPMachinesOnMaintenanceHosts(ctx context.Context, maasClient maasclient.ClientSetInterface, cluster *clusterv1.Cluster, namespace string, log logr.Logger) ([]cpMachineOnMaintenanceHost, error) {
 	var result []cpMachineOnMaintenanceHost
 
@@ -352,14 +402,6 @@ func (r *VMEvacuationReconciler) findCPMachinesOnMaintenanceHosts(ctx context.Co
 				"hostname", hostDetails.Hostname(),
 				"opID", opID)
 
-			// Create maintenance session ConfigMap immediately with status Active
-			if err := r.saveMaintenanceSession(ctx, namespace, opID, hostSystemID, string(maintenance.StatusActive)); err != nil {
-				log.Error(err, "failed to save maintenance session ConfigMap", "opID", opID)
-				// Continue even if ConfigMap creation fails
-			} else {
-				log.Info("Created maintenance session ConfigMap", "opID", opID, "hostSystemID", hostSystemID)
-			}
-
 			result = append(result, cpMachineOnMaintenanceHost{
 				Machine:      machine,
 				HostSystemID: hostSystemID,
@@ -448,7 +490,15 @@ func (r *VMEvacuationReconciler) isKCPStable(kcp *unstructured.Unstructured, log
 	// Get replica counts from status
 	specReplicas, hasSpecReplicas, _ := unstructured.NestedInt64(kcp.Object, "spec", "replicas")
 	readyReplicas, hasReadyReplicas, _ := unstructured.NestedInt64(kcp.Object, "status", "readyReplicas")
-	updatedReplicas, hasUpdatedReplicas, _ := unstructured.NestedInt64(kcp.Object, "status", "updatedReplicas")
+	// CAPI v1beta2 renamed the up-to-date replica count: `updatedReplicas` (v1beta1) became
+	// `upToDateReplicas`, and the old field is deprecated and no longer populated by the KCP
+	// controller as of CAPI v1.13 — reading it here made the stability gate never pass on a
+	// healthy control plane and blocked VM evacuation indefinitely. PCP-7660.
+	updatedReplicas, hasUpdatedReplicas, _ := unstructured.NestedInt64(kcp.Object, "status", "upToDateReplicas")
+	if !hasUpdatedReplicas {
+		// v1beta1-shaped status still writes the old name; fall back to it.
+		updatedReplicas, hasUpdatedReplicas, _ = unstructured.NestedInt64(kcp.Object, "status", "updatedReplicas")
+	}
 	replicas, hasStatusReplicas, _ := unstructured.NestedInt64(kcp.Object, "status", "replicas")
 
 	if !hasSpecReplicas || !hasReadyReplicas || !hasUpdatedReplicas || !hasStatusReplicas {
@@ -457,13 +507,13 @@ func (r *VMEvacuationReconciler) isKCPStable(kcp *unstructured.Unstructured, log
 	}
 
 	// KCP is stable when:
-	// readyReplicas == updatedReplicas == replicas == spec.replicas
+	// readyReplicas == upToDateReplicas == replicas == spec.replicas
 	stable := readyReplicas == updatedReplicas && updatedReplicas == replicas && replicas == specReplicas
 	if !stable {
 		log.Info("KCP not stable",
 			"specReplicas", specReplicas,
 			"readyReplicas", readyReplicas,
-			"updatedReplicas", updatedReplicas,
+			"upToDateReplicas", updatedReplicas,
 			"replicas", replicas)
 	}
 
@@ -671,8 +721,9 @@ func (r *VMEvacuationReconciler) saveMaintenanceSession(ctx context.Context, nam
 	return nil
 }
 
-// tagReplacementVMAndCompleteSession tags the replacement VM with ready-op after KCP is stable
-func (r *VMEvacuationReconciler) tagReplacementVMAndCompleteSession(ctx context.Context, maasClient maasclient.ClientSetInterface, cluster *clusterv1.Cluster, opID string, log logr.Logger) error {
+// tagReplacementVMAndCompleteSession tags the replacement VM with ready-op after KCP is stable.
+// It returns whether a replacement VM was provisioned (newVMSystemID set in the session ConfigMap).
+func (r *VMEvacuationReconciler) tagReplacementVMAndCompleteSession(ctx context.Context, maasClient maasclient.ClientSetInterface, cluster *clusterv1.Cluster, opID string, log logr.Logger) (bool, error) {
 	// Get the maintenance session ConfigMap
 	cm := &corev1.ConfigMap{}
 	cmKey := types.NamespacedName{
@@ -681,21 +732,21 @@ func (r *VMEvacuationReconciler) tagReplacementVMAndCompleteSession(ctx context.
 	}
 
 	if err := r.Get(ctx, cmKey, cm); err != nil {
-		return errors.Wrap(err, "failed to get maintenance session ConfigMap")
+		return false, errors.Wrap(err, "failed to get maintenance session ConfigMap")
 	}
 
 	// Check if newVMSystemID has been set by provisioning
 	newVMSystemID := cm.Data[maintenance.CmKeyNewVMSystemID]
 	if newVMSystemID == "" {
 		log.V(1).Info("Replacement VM not yet provisioned (newVMSystemID not set)", "opID", opID)
-		return nil
+		return false, nil
 	}
 
 	log.Info("Found replacement VM in ConfigMap, tagging with ready-op", "opID", opID, "systemID", newVMSystemID)
 
 	// Tag the VM with maas-lxd-ready-op-<opID>
 	if err := maintenance.TagVMReadyOp(ctx, maasClient, newVMSystemID, opID); err != nil {
-		return errors.Wrap(err, "failed to tag replacement VM with ready-op")
+		return false, errors.Wrap(err, "failed to tag replacement VM with ready-op")
 	}
 
 	log.Info("Successfully tagged replacement VM with ready-op", "opID", opID, "systemID", newVMSystemID)
@@ -706,11 +757,11 @@ func (r *VMEvacuationReconciler) tagReplacementVMAndCompleteSession(ctx context.
 	}
 	cm.Data[maintenance.CmKeyStatus] = string(maintenance.StatusCompleted)
 	if err := r.Update(ctx, cm); err != nil {
-		return errors.Wrap(err, "failed to mark session as completed")
+		return false, errors.Wrap(err, "failed to mark session as completed")
 	}
 
 	log.Info("Marked maintenance session as completed", "opID", opID)
-	return nil
+	return true, nil
 }
 
 // SetupWithManager sets up the controller with the Manager
