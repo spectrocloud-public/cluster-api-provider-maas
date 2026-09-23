@@ -165,16 +165,20 @@ func (r *VMEvacuationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 
-		// PCP-7660: the session is created before the stability gates, so a failed gate
-		// strands it Active with no replacement ever provisioned — only Step 3/4 deletes
-		// the CP machine whose replacement writes newVMSystemID, and Step 3/4 never runs
-		// while a session is Active. Detect the stranded state (KCP stable, no replacement,
-		// the triggering CP machine still undeleted on the session host, no other CP
-		// eviction in flight) and drop the session so the next reconcile re-enters Step 3/4.
+		// PCP-7660: legacy sessions were created during host discovery, before the stability
+		// gates, so a failed gate stranded them Active with no replacement ever provisioned.
+		// Sessions claimed in Step 4 set evictionStarted=true; those are in-flight evacuations
+		// (including 1-CP maxSurge, where the original Machine stays undeleted while the
+		// replacement is created) and must not be healed away. Only drop unmarked (legacy)
+		// sessions so the next reconcile re-enters Step 3/4.
 		sessionCM := &corev1.ConfigMap{}
 		sessionKey := types.NamespacedName{Namespace: cluster.Namespace, Name: getMaintenanceConfigMapName(activeOpID)}
 		if err := r.Get(ctx, sessionKey, sessionCM); err != nil {
 			log.Error(err, "failed to get maintenance session ConfigMap", "opID", activeOpID)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if sessionCM.Data[maintenance.CmKeyEvictionStarted] == "true" {
+			// Eviction was claimed after the gates; wait for replacement provisioning.
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		sessionHost := sessionCM.Data[maintenance.CmKeyCurrentHost]
@@ -193,8 +197,16 @@ func (r *VMEvacuationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 			log.Info("Stranded maintenance session: replacement never provisioned and the CP machine is still on the maintenance host; dropping session to re-drive eviction",
 				"opID", activeOpID, "host", sessionHost, "machine", cpInfo.Machine.Name)
-			if err := r.Delete(ctx, sessionCM); err != nil && !apierrors.IsNotFound(err) {
-				log.Error(err, "failed to delete stranded maintenance session ConfigMap", "opID", activeOpID)
+			// Optimistic delete: if provisioning wrote newVMSystemID after our Get, the
+			// resourceVersion precondition conflicts and we preserve the now-valid session.
+			rv := sessionCM.ResourceVersion
+			if err := r.Delete(ctx, sessionCM, client.Preconditions{ResourceVersion: &rv}); err != nil {
+				if apierrors.IsConflict(err) {
+					log.Info("Stranded-session delete conflicted with a concurrent ConfigMap update; preserving session",
+						"opID", activeOpID)
+				} else if !apierrors.IsNotFound(err) {
+					log.Error(err, "failed to delete stranded maintenance session ConfigMap", "opID", activeOpID)
+				}
 			}
 			break
 		}
@@ -680,7 +692,10 @@ func (r *VMEvacuationReconciler) listMaintenanceSessions(ctx context.Context, na
 	return sessions, nil
 }
 
-// saveMaintenanceSession creates or updates the maintenance session ConfigMap
+// saveMaintenanceSession creates or updates the maintenance session ConfigMap.
+// Always sets evictionStarted=true: this helper is only called from Step 4 once the
+// stability gates have passed and eviction is about to run. Legacy discovery-time
+// sessions lack this marker and are eligible for stranded-session healing.
 func (r *VMEvacuationReconciler) saveMaintenanceSession(ctx context.Context, namespace, opID, hostSystemID, status string) error {
 	cmName := getMaintenanceConfigMapName(opID)
 	cm := &corev1.ConfigMap{
@@ -689,10 +704,11 @@ func (r *VMEvacuationReconciler) saveMaintenanceSession(ctx context.Context, nam
 			Namespace: namespace,
 		},
 		Data: map[string]string{
-			maintenance.CmKeyOpID:        opID,
-			maintenance.CmKeyStatus:      status,
-			maintenance.CmKeyCurrentHost: hostSystemID,
-			maintenance.CmKeyStartedAt:   time.Now().UTC().Format(time.RFC3339),
+			maintenance.CmKeyOpID:            opID,
+			maintenance.CmKeyStatus:          status,
+			maintenance.CmKeyCurrentHost:     hostSystemID,
+			maintenance.CmKeyStartedAt:       time.Now().UTC().Format(time.RFC3339),
+			maintenance.CmKeyEvictionStarted: "true",
 		},
 	}
 
