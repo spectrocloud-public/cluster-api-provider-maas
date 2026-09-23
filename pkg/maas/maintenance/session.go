@@ -40,13 +40,15 @@ const (
 	cmKeyAffectedWLCClusters        = "affectedWLCClusters"        // JSON array of cluster IDs
 	cmKeyPendingReadyVMReplacements = "pendingReadyVMReplacements" // JSON array of VM system IDs
 	cmKeyNewVMSystemID              = "newVMSystemID"              // New VM system ID for replacement
+	cmKeyEvictionStarted            = "evictionStarted"            // Set when Step 4 claims the session and starts eviction
 
 	// Exported keys for external use (e.g., machine.go, vmevacuation_controller.go)
-	CmKeyOpID          = cmKeyOpID
-	CmKeyStatus        = cmKeyStatus
-	CmKeyNewVMSystemID = cmKeyNewVMSystemID
-	CmKeyCurrentHost   = cmKeyCurrentHost
-	CmKeyStartedAt     = cmKeyStartedAt
+	CmKeyOpID             = cmKeyOpID
+	CmKeyStatus           = cmKeyStatus
+	CmKeyNewVMSystemID    = cmKeyNewVMSystemID
+	CmKeyCurrentHost      = cmKeyCurrentHost
+	CmKeyStartedAt        = cmKeyStartedAt
+	CmKeyEvictionStarted  = cmKeyEvictionStarted
 
 	// Optional trigger keys to initiate a session
 	CmKeyTriggerStart = "start"
