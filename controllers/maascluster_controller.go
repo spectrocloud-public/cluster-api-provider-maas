@@ -179,7 +179,11 @@ func (r *MaasClusterReconciler) reconcileDNSAttachments(clusterScope *scope.Clus
 			continue
 		}
 
-		machineIP := getExternalMachineIP(m)
+		machineIP, err := selectMachineIPForDNS(m, clusterScope.MaasCluster.Spec.APIServerInterfaceTag, dnssvc)
+		if err != nil {
+			return errors.Wrapf(err, "unable to select IP for machine %q", m.Name)
+		}
+
 		attached := currentIPs.Has(machineIP)
 		isRunningHealthy := IsRunning(m)
 
