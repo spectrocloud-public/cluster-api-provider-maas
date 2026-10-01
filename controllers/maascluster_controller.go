@@ -205,6 +205,8 @@ func (r *MaasClusterReconciler) reconcileDNSAttachments(clusterScope *scope.Clus
 		//runningIpAddresses = append(runningIpAddresses, m.)
 	}
 
+	clusterScope.MaasCluster.Status.Network.PublishedInterfaceTag = clusterScope.MaasCluster.Spec.APIServerInterfaceTag
+
 	if err := dnssvc.UpdateDNSAttachments(runningIpAddresses); err != nil {
 		return err
 	} else if len(machinesPendingAttachment) > 0 || len(machinesPendingDetachment) > 0 {
