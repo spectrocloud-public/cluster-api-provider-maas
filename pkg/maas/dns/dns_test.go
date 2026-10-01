@@ -307,7 +307,8 @@ func TestGetMachineIPForInterfaceTag(t *testing.T) {
 
 		_, err := s.GetMachineIPForInterfaceTag("abc123", "control-plane")
 		g.Expect(err).To(HaveOccurred())
-		g.Expect(err.Error()).To(ContainSubstring("no interface with tag \"control-plane\" found"))
+		g.Expect(err.Error()).To(ContainSubstring("interface tag not found: tag \"control-plane\""))
+		g.Expect(err).To(MatchError(ErrInterfaceTagNotFound))
 	})
 
 	t.Run("fails when selected interface has no ip", func(t *testing.T) {
@@ -328,7 +329,8 @@ func TestGetMachineIPForInterfaceTag(t *testing.T) {
 
 		_, err := s.GetMachineIPForInterfaceTag("abc123", "control-plane")
 		g.Expect(err).To(HaveOccurred())
-		g.Expect(err.Error()).To(ContainSubstring("no IPv4 address found on interface"))
+		g.Expect(err.Error()).To(ContainSubstring("IPv4 address not found: interface \"eno2\""))
+		g.Expect(err).To(MatchError(ErrIPv4NotFound))
 	})
 
 	t.Run("returns ip from bridge child when tagged NIC has no links", func(t *testing.T) {
