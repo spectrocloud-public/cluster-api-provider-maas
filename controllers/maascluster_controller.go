@@ -173,36 +173,22 @@ func (r *MaasClusterReconciler) reconcileDNSAttachments(clusterScope *scope.Clus
 
 	machinesPendingAttachment := make([]*infrav1beta1.MaasMachine, 0)
 	machinesPendingDetachment := make([]*infrav1beta1.MaasMachine, 0)
-	preferredInterfaceTag := clusterScope.MaasCluster.Spec.APIServerInterfaceTag
-	var requeueOnIPError bool
 
 	for _, m := range machines {
 		if !IsControlPlaneMachine(m) {
 			continue
 		}
 
-		isRunningHealthy := IsRunning(m)
-		var machineIP string
-
-		if !m.DeletionTimestamp.IsZero() || !isRunningHealthy {
-			machineIP = getExternalMachineIP(m)
-		} else {
-			machineIP, err = selectMachineIPForDNS(m, preferredInterfaceTag, dnssvc)
-			if err != nil {
-				clusterScope.Error(err, "unable to select API server IP; skipping machine until next reconcile", "machine", m.Name)
-				requeueOnIPError = true
-				continue
-			}
-		}
-
+		machineIP := getExternalMachineIP(m)
 		attached := currentIPs.Has(machineIP)
+		isRunningHealthy := IsRunning(m)
 
 		if !m.DeletionTimestamp.IsZero() || !isRunningHealthy {
 			if attached {
 				clusterScope.Info("Cleaning up IP on unhealthy machine", "machine", m.Name)
 				machinesPendingDetachment = append(machinesPendingDetachment, m)
 			}
-		} else if isRunningHealthy {
+		} else if IsRunning(m) {
 			if !attached {
 				clusterScope.Info("Healthy machine without DNS attachment; attaching.", "machine", m.Name)
 				machinesPendingAttachment = append(machinesPendingAttachment, m)
@@ -221,12 +207,6 @@ func (r *MaasClusterReconciler) reconcileDNSAttachments(clusterScope *scope.Clus
 		clusterScope.Info("Pending DNS attachments or detachments; will retry again")
 		return ErrRequeueDNS
 	}
-
-	if requeueOnIPError {
-		return ErrRequeueDNS
-	}
-
-	clusterScope.MaasCluster.Status.Network.PublishedInterfaceTag = preferredInterfaceTag
 
 	return nil
 }
