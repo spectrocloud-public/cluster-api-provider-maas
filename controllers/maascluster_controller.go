@@ -304,6 +304,14 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 			//return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 
+		if errors.Is(err, dns.ErrInterfaceTagNotFound) ||
+			errors.Is(err, dns.ErrDuplicateInterfaceTag) ||
+			errors.Is(err, dns.ErrIPv4NotFound) {
+			conditions.Set(maasCluster, metav1.Condition{Type: infrav1beta1.DNSReadyCondition, Status: metav1.ConditionFalse, Reason: infrav1beta1.DNSIPResolutionFailedReason, Message: err.Error()})
+			clusterScope.Info("Unable to resolve DNS IP", "error", err)
+			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		}
+
 		clusterScope.Error(err, "failed to reconcile load balancer")
 		return reconcile.Result{}, err
 
