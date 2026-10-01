@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sort"
 
@@ -17,7 +18,12 @@ type Service struct {
 	maasClient maasclient.ClientSetInterface
 }
 
-var ErrNotFound = errors.New("resource not found")
+var (
+	ErrNotFound              = errors.New("resource not found")
+	ErrInterfaceTagNotFound  = errors.New("interface tag not found")
+	ErrDuplicateInterfaceTag = errors.New("duplicate interface tag")
+	ErrIPv4NotFound          = errors.New("IPv4 address not found")
+)
 
 // DNS service returns a new helper for managing a MaaS "DNS" (DNS client loadbalancing)
 func NewService(clusterScope *scope.ClusterScope) *Service {
@@ -146,7 +152,7 @@ func (s *Service) GetMachineIPForInterfaceTag(systemID, interfaceTag string) (st
 	}
 
 	if len(matched) == 0 {
-		return "", errors.Errorf("no interface with tag %q found for machine %q", interfaceTag, systemID)
+		return "", fmt.Errorf("%w: tag %q for machine %q", ErrInterfaceTagNotFound, interfaceTag, systemID)
 	}
 
 	if len(matched) > 1 {
@@ -154,7 +160,7 @@ func (s *Service) GetMachineIPForInterfaceTag(systemID, interfaceTag string) (st
 		for i, iface := range matched {
 			names[i] = iface.Name()
 		}
-		return "", errors.Errorf("tag %q is assigned to multiple interfaces %v on machine %q; each tag must be unique per machine", interfaceTag, names, systemID)
+		return "", fmt.Errorf("%w: tag %q is assigned to multiple interfaces %v on machine %q", ErrDuplicateInterfaceTag, interfaceTag, names, systemID)
 	}
 
 	iface := matched[0]
@@ -188,7 +194,7 @@ func (s *Service) GetMachineIPForInterfaceTag(systemID, interfaceTag string) (st
 		}
 	}
 
-	return "", errors.Errorf("no IPv4 address found on interface %q or its children (tag %q) for machine %q", iface.Name(), interfaceTag, systemID)
+	return "", fmt.Errorf("%w: interface %q or its children (tag %q) for machine %q", ErrIPv4NotFound, iface.Name(), interfaceTag, systemID)
 }
 
 func (s *Service) GetDNSResource() (maasclient.DNSResource, error) {
