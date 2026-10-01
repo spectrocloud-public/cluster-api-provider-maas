@@ -88,6 +88,9 @@ const (
 	// dns reconcile failure will be retried
 	DNSFailedReason = "LoadBalancerFailed"
 
+	// DNSIPResolutionFailedReason documents a DNS IP resolution failure.
+	DNSIPResolutionFailedReason = "DNSIPResolutionFailed"
+
 	WaitForDNSNameReason = "WaitForDNSName"
 )
 
