@@ -260,8 +260,8 @@ func TestMachine(t *testing.T) {
 
 		s := &Service{
 			scope: &scope.MachineScope{
-				Logger:      log,
-				Cluster:     cluster,
+				Logger:  log,
+				Cluster: cluster,
 				ClusterScope: &scope.ClusterScope{
 					MaasCluster: &infrav1beta1.MaasCluster{},
 				},
