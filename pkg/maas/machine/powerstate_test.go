@@ -67,6 +67,7 @@ func TestFromSDKTypeToMachinePowerState(t *testing.T) {
 			mockMachine.EXPECT().PowerState().Return(tt.powerState)
 			mockMachine.EXPECT().Zone().Return(mockZone)
 			mockZone.EXPECT().Name().Return("zone1")
+			mockMachine.EXPECT().DeployedInMemory().AnyTimes().Return(false)
 			mockMachine.EXPECT().FQDN().AnyTimes().Return("")
 			mockMachine.EXPECT().IPAddresses().Return([]net.IP{})
 
