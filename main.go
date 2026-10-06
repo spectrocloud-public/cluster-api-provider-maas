@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/cluster-api/controllers/remote"
 
 	"github.com/spectrocloud/cluster-api-provider-maas/controllers"
+	maasmachine "github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/machine"
 
 	"github.com/spf13/pflag"
 	appsv1 "k8s.io/api/apps/v1"
@@ -61,6 +62,7 @@ var (
 	healthAddr           string
 	webhookPort          int
 	watchNamespace       string
+	releaseErase         string
 )
 
 func init() {
@@ -81,6 +83,13 @@ func main() {
 	pflag.Parse()
 
 	ctrl.SetLogger(textlogger.NewLogger(textlogger.NewConfig()))
+
+	eraseMode, err := maasmachine.ParseEraseMode(releaseErase)
+	if err != nil {
+		setupLog.Error(err, "invalid --release-erase")
+		os.Exit(1)
+	}
+	maasmachine.ReleaseErase = eraseMode
 
 	if watchNamespace != "" {
 		setupLog.Info("Watching cluster-api objects only in namespace for reconciliation", "namespace", watchNamespace)
@@ -230,6 +239,8 @@ func initFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&watchNamespace, "namespace", "",
 		"Namespace that the controller watches to reconcile cluster-api objects. If unspecified, the controller watches for cluster-api objects across all namespaces.",
 	)
+	fs.StringVar(&releaseErase, "release-erase", string(maasmachine.EraseNone),
+		"Disk erase MAAS runs when a machine is released: none, quick, secure or full.")
 
 	feature.MutableGates.AddFlag(fs)
 }

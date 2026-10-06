@@ -140,28 +140,99 @@ func TestMachine(t *testing.T) {
 	})
 
 	t.Run("release machine", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		mockClientSetInterface := mockclientset.NewMockClientSetInterface(ctrl)
-		mockMachines := mockclientset.NewMockMachines(ctrl)
-		mockMachine := mockclientset.NewMockMachine(ctrl)
-		mockMachineReleaser := mockclientset.NewMockMachineReleaser(ctrl)
-
-		s := &Service{
-			scope: &scope.MachineScope{
-				Logger:  log,
-				Cluster: cluster,
+		tests := []struct {
+			name   string
+			mode   EraseMode
+			expect func(r *mockclientset.MockMachineReleaser)
+		}{
+			{
+				name:   "no erase by default",
+				mode:   EraseNone,
+				expect: func(r *mockclientset.MockMachineReleaser) {},
 			},
-			maasClient: mockClientSetInterface,
+			{
+				name: "quick erase",
+				mode: EraseQuick,
+				expect: func(r *mockclientset.MockMachineReleaser) {
+					r.EXPECT().WithErase().Return(r)
+					r.EXPECT().WithQuickErase().Return(r)
+				},
+			},
+			{
+				name: "secure erase",
+				mode: EraseSecure,
+				expect: func(r *mockclientset.MockMachineReleaser) {
+					r.EXPECT().WithErase().Return(r)
+					r.EXPECT().WithSecureErase().Return(r)
+				},
+			},
+			{
+				name: "full erase",
+				mode: EraseFull,
+				expect: func(r *mockclientset.MockMachineReleaser) {
+					r.EXPECT().WithErase().Return(r)
+				},
+			},
 		}
 
-		mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
-		mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
-		mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
-		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				g := NewGomegaWithT(t)
+				ctrl := gomock.NewController(t)
+				mockClientSetInterface := mockclientset.NewMockClientSetInterface(ctrl)
+				mockMachines := mockclientset.NewMockMachines(ctrl)
+				mockMachine := mockclientset.NewMockMachine(ctrl)
+				mockMachineReleaser := mockclientset.NewMockMachineReleaser(ctrl)
 
-		err := s.ReleaseMachine("abc123")
-		g.Expect(err).ToNot(HaveOccurred())
+				prev := ReleaseErase
+				ReleaseErase = tt.mode
+				t.Cleanup(func() { ReleaseErase = prev })
+
+				s := &Service{
+					scope: &scope.MachineScope{
+						Logger:  log,
+						Cluster: cluster,
+					},
+					maasClient: mockClientSetInterface,
+				}
+
+				mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
+				mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
+				mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
+				tt.expect(mockMachineReleaser)
+				mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
+
+				g.Expect(s.ReleaseMachine("abc123")).To(Succeed())
+			})
+		}
+	})
+
+	t.Run("parse erase mode", func(t *testing.T) {
+		tests := []struct {
+			in      string
+			want    EraseMode
+			wantErr bool
+		}{
+			{in: "none", want: EraseNone},
+			{in: "quick", want: EraseQuick},
+			{in: "secure", want: EraseSecure},
+			{in: "full", want: EraseFull},
+			{in: "", wantErr: true},
+			{in: "fast", wantErr: true},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.in, func(t *testing.T) {
+				g := NewGomegaWithT(t)
+				got, err := ParseEraseMode(tt.in)
+				if tt.wantErr {
+					g.Expect(err).To(HaveOccurred())
+					return
+				}
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(got).To(Equal(tt.want))
+			})
+		}
 	})
 
 	t.Run("deploy machine with existing provider id", func(t *testing.T) {

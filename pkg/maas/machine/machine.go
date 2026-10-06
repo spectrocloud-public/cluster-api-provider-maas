@@ -53,6 +53,28 @@ func splitImage(image string) (osystem, distroSeries string) {
 	return customOSSystem, image
 }
 
+// EraseMode selects how MAAS wipes a machine's disks when it is released.
+type EraseMode string
+
+const (
+	EraseNone   EraseMode = "none"
+	EraseQuick  EraseMode = "quick"
+	EraseSecure EraseMode = "secure"
+	EraseFull   EraseMode = "full"
+)
+
+// ReleaseErase is set from the manager's --release-erase flag.
+var ReleaseErase = EraseNone
+
+// ParseEraseMode validates a --release-erase value.
+func ParseEraseMode(v string) (EraseMode, error) {
+	switch m := EraseMode(v); m {
+	case EraseNone, EraseQuick, EraseSecure, EraseFull:
+		return m, nil
+	}
+	return "", errors.Errorf("invalid erase mode %q: want none, quick, secure or full", v)
+}
+
 type Service struct {
 	scope      *scope.MachineScope
 	maasClient maasclient.ClientSetInterface
@@ -115,10 +137,18 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 func (s *Service) ReleaseMachine(systemID string) error {
 	ctx := context.TODO()
 
-	_, err := s.maasClient.Machines().
-		Machine(systemID).
-		Releaser().
-		Release(ctx)
+	releaser := s.maasClient.Machines().Machine(systemID).Releaser()
+	// MAAS ignores quick_erase and secure_erase unless erase=true is also set.
+	switch ReleaseErase {
+	case EraseQuick:
+		releaser = releaser.WithErase().WithQuickErase()
+	case EraseSecure:
+		releaser = releaser.WithErase().WithSecureErase()
+	case EraseFull:
+		releaser = releaser.WithErase()
+	}
+
+	_, err := releaser.Release(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to release machine")
 	}
