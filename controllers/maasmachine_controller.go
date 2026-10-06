@@ -615,6 +615,10 @@ func (r *MaasMachineReconciler) reconcileDNSAttachment(machineScope *scope.Machi
 		return nil
 	}
 
+	if clusterScope.IsCustomEndpoint() {
+		return nil
+	}
+
 	dnssvc := maasdns.NewService(clusterScope)
 
 	// In order to prevent sending request to a "not-ready" control plane machines, it is required to remove the machine

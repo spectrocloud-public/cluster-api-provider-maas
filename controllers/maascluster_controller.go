@@ -159,6 +159,10 @@ func (r *MaasClusterReconciler) reconcileDelete(ctx context.Context, clusterScop
 }
 
 func (r *MaasClusterReconciler) reconcileDNSAttachments(clusterScope *scope.ClusterScope, dnssvc *dns.Service) error {
+	if clusterScope.IsCustomEndpoint() {
+		return nil
+	}
+
 	machines, err := clusterScope.GetClusterMaasMachines()
 	if err != nil {
 		return errors.Wrapf(err, "Unable to list all maas machines")

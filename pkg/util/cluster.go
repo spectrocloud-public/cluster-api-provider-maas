@@ -10,8 +10,17 @@ import (
 )
 
 const (
-	APIServerReadinessLabel           = "cluster-api-maas/api-server-ready"
+	// CustomEndpointProvidedAnnotation marks a MaasCluster whose control-plane endpoint is
+	// managed outside MAAS. The provider then neither creates nor updates a MAAS DNS record.
+	CustomEndpointProvidedAnnotation = "spectrocloud.com/custom-dns-provided"
+	APIServerReadinessLabel          = "cluster-api-maas/api-server-ready"
 )
+
+// IsCustomEndpointPresent reports whether the custom endpoint annotation is set, whatever its value.
+func IsCustomEndpointPresent(annotations map[string]string) bool {
+	_, ok := annotations[CustomEndpointProvidedAnnotation]
+	return ok
+}
 
 // HasNamespaceLabel checks if a namespace has a specific label with the expected value
 func HasNamespaceLabel(ctx context.Context, client client.Client, namespaceName, labelKey, expectedValue string) (bool, error) {
