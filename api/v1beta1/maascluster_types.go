@@ -45,6 +45,42 @@ type MaasClusterSpec struct {
 	// LXDConfig contains the configuration for LXD hosts
 	// +optional
 	LXDConfig *LXDConfig `json:"lxdConfig,omitempty"`
+
+	// Virsh contains the configuration for composing VMs on MAAS-registered
+	// libvirt/KVM (virsh) VM hosts. Unlike the LXD path, the provider does not
+	// register these hosts; they must already be VM hosts in MAAS.
+	// +optional
+	Virsh *VirshConfig `json:"virsh,omitempty"`
+}
+
+// VirshConfig configures composition of VMs on MAAS-registered virsh (libvirt/KVM) VM hosts.
+type VirshConfig struct {
+	// Enabled turns on virsh VM composition for this cluster.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// ResourcePool restricts host selection to virsh hosts in this MAAS resource pool.
+	// Empty means any pool.
+	// +optional
+	ResourcePool string `json:"resourcePool,omitempty"`
+
+	// Zone restricts host selection to virsh hosts in this MAAS zone (a rack, and therefore
+	// the failure domain). Empty means any zone; a MaasMachine's failureDomain takes
+	// precedence over this when set.
+	// +optional
+	Zone string `json:"zone,omitempty"`
+
+	// HostTags restricts selection to virsh hosts carrying ALL of these MAAS tags. This is the
+	// intended way to mark which hypervisors may host cluster workers, in place of the LXD
+	// path's "lxd-host-" name-prefix convention.
+	// +optional
+	HostTags []string `json:"hostTags,omitempty"`
+
+	// StoragePool names the libvirt storage pool to compose VM disks from. Empty lets MAAS
+	// pick the host's default pool.
+	// +optional
+	StoragePool string `json:"storagePool,omitempty"`
 }
 
 // LXDConfig contains the configuration for LXD hosts
