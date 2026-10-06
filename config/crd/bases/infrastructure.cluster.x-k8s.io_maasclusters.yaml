@@ -112,6 +112,41 @@ spec:
                       LXD VM hosts in
                     type: string
                 type: object
+              virsh:
+                description: |-
+                  Virsh contains the configuration for composing VMs on MAAS-registered
+                  libvirt/KVM (virsh) VM hosts. Unlike the LXD path, the provider does not
+                  register these hosts; they must already be VM hosts in MAAS.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled turns on virsh VM composition for this cluster.
+                    type: boolean
+                  hostTags:
+                    description: |-
+                      HostTags restricts selection to virsh hosts carrying ALL of these MAAS tags. This is the
+                      intended way to mark which hypervisors may host cluster workers, in place of the LXD
+                      path's "lxd-host-" name-prefix convention.
+                    items:
+                      type: string
+                    type: array
+                  resourcePool:
+                    description: |-
+                      ResourcePool restricts host selection to virsh hosts in this MAAS resource pool.
+                      Empty means any pool.
+                    type: string
+                  storagePool:
+                    description: |-
+                      StoragePool names the libvirt storage pool to compose VM disks from. Empty lets MAAS
+                      pick the host's default pool.
+                    type: string
+                  zone:
+                    description: |-
+                      Zone restricts host selection to virsh hosts in this MAAS zone (a rack, and therefore
+                      the failure domain). Empty means any zone; a MaasMachine's failureDomain takes
+                      precedence over this when set.
+                    type: string
+                type: object
             required:
             - dnsDomain
             type: object

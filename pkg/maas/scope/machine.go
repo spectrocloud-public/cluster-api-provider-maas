@@ -342,6 +342,30 @@ func (m *MachineScope) SetNodeProviderID() error {
 	return patchHelper.Patch(ctx, node)
 }
 
+// IsVirshVMRequested reports whether this machine is composed as a virsh VM rather than
+// allocated from bare metal.
+func (m *MachineScope) IsVirshVMRequested() bool {
+	v := m.MaasMachine.Spec.Virsh
+	return v != nil && v.Enabled != nil && *v.Enabled
+}
+
+// VirshStoragePool returns the machine-level libvirt storage pool override, or "" when unset.
+func (m *MachineScope) VirshStoragePool() string {
+	if v := m.MaasMachine.Spec.Virsh; v != nil {
+		return v.StoragePool
+	}
+	return ""
+}
+
+// VirshHostTags returns machine-level host tag requirements, layered on top of the
+// cluster-level ones.
+func (m *MachineScope) VirshHostTags() []string {
+	if v := m.MaasMachine.Spec.Virsh; v != nil {
+		return v.HostTags
+	}
+	return nil
+}
+
 // GetDynamicLXD returns whether this machine should be created as an LXD VM (driven by higher-level policy).
 func (m *MachineScope) GetDynamicLXD() bool {
 	if m.MaasMachine.Spec.LXD != nil && m.MaasMachine.Spec.LXD.Enabled != nil {
