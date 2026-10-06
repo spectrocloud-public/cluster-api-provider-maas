@@ -162,6 +162,16 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 
 	mm := s.scope.MaasMachine
 
+	// A VM has exactly one hypervisor; refuse rather than silently prefer one.
+	if s.scope.IsVirshVMRequested() && s.scope.GetDynamicLXD() {
+		return nil, errors.New("machine requests both spec.virsh and spec.lxd; a VM has exactly one hypervisor")
+	}
+
+	if s.scope.IsVirshVMRequested() {
+		s.scope.Info("Using virsh VM composition path", "machine", mm.Name)
+		return s.createVirshVM(ctx, userDataB64)
+	}
+
 	// Decide if we should create a VM via MAAS (LXD) based on user input or node-pool policy.
 	// Machine-level enablement (preferred) or node-pool policy (fallback)
 	if s.scope.GetDynamicLXD() {
@@ -220,7 +230,7 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 		}
 
 		// Backstop: If MAAS still returned a VM host, reject it for HCP control-plane
-		if s.scope.ClusterScope.IsLXDHostEnabled() {
+		if s.scope.ClusterScope.IsLXDHostEnabled() || s.scope.ClusterScope.IsVirshEnabled() {
 			pt := strings.ToLower(m.PowerType())
 			if pt == "lxd" || pt == "lxdvm" || pt == "virsh" {
 				s.scope.Info("Rejecting VM host allocation for node(s) under HCP; releasing and retrying",
@@ -242,7 +252,7 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 		}
 
 		// Backstop for reuse path: if previous reconcile captured a VM host, reject for HCP CP
-		if s.scope.ClusterScope.IsLXDHostEnabled() {
+		if s.scope.ClusterScope.IsLXDHostEnabled() || s.scope.ClusterScope.IsVirshEnabled() {
 			pt := strings.ToLower(m.PowerType())
 			if pt == "lxd" || pt == "lxdvm" || pt == "virsh" {
 				s.scope.Info("Releasing previously selected VM host for node(s) under HCP; will re-allocate BM",

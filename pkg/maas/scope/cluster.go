@@ -375,6 +375,24 @@ func (s *ClusterScope) IsLXDHostEnabled() bool {
 	return false
 }
 
+// IsVirshEnabled reports whether this cluster composes VMs on MAAS-registered
+// libvirt/KVM (virsh) hosts.
+func (s *ClusterScope) IsVirshEnabled() bool {
+	if s == nil || s.MaasCluster == nil {
+		return false
+	}
+	v := s.MaasCluster.Spec.Virsh
+	return v != nil && v.Enabled != nil && *v.Enabled
+}
+
+// GetVirshConfig returns the cluster's virsh configuration, or nil when unset.
+func (s *ClusterScope) GetVirshConfig() *infrav1beta1.VirshConfig {
+	if s == nil || s.MaasCluster == nil {
+		return nil
+	}
+	return s.MaasCluster.Spec.Virsh
+}
+
 // GetLXDConfig returns the LXD configuration
 func (s *ClusterScope) GetLXDConfig() *infrav1beta1.LXDConfig {
 	return s.MaasCluster.Spec.LXDConfig

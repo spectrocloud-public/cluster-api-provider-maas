@@ -136,6 +136,29 @@ spec:
                         items:
                           type: string
                         type: array
+                      virsh:
+                        description: |-
+                          Virsh requests that this machine be composed as a VM on a MAAS-registered virsh
+                          (libvirt/KVM) host rather than allocated from bare metal. When nil or disabled, this
+                          machine is allocated from bare metal as usual.
+                        properties:
+                          enabled:
+                            default: false
+                            description: Enabled specifies whether this machine is
+                              composed as a virsh VM.
+                            type: boolean
+                          hostTags:
+                            description: |-
+                              HostTags further restricts which virsh hosts may run this machine, on top of the
+                              cluster-level hostTags. All listed tags must be present on the host.
+                            items:
+                              type: string
+                            type: array
+                          storagePool:
+                            description: StoragePool overrides the cluster-level libvirt
+                              storage pool for this machine's disk.
+                            type: string
+                        type: object
                     required:
                     - image
                     - minCPU
