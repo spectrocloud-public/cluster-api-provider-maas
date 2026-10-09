@@ -13,7 +13,7 @@ RELEASE_DIR := _build/release
 DEV_DIR := _build/dev
 REPO_ROOT := $(shell git rev-parse --show-toplevel)
 FIPS_ENABLE ?= ""
-BUILDER_GOLANG_VERSION ?= 1.25.8
+BUILDER_GOLANG_VERSION ?= 1.26.9
 BUILD_ARGS = --build-arg CRYPTO_LIB=${FIPS_ENABLE} --build-arg BUILDER_GOLANG_VERSION=${BUILDER_GOLANG_VERSION}
 ARCH ?= amd64
 ALL_ARCH = amd64 arm64
