@@ -473,7 +473,21 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 				// VM just composed and is commissioning; requeue shortly
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
+			if errors.Is(err, maasmachine.ErrMachineCommissioning) {
+				// The machine is still commissioning in MAAS and we have no control over it during
+				// this stage; the static IP is configured on a later reconcile. Report it at info
+				// severity rather than as a deployment failure, so waiting for commissioning stops
+				// showing up as an error event in Palette. See PCP-6208.
+				machineScope.Info("Machine is commissioning in MaaS; static IP configuration will be retried after commissioning completes")
+				conditions.MarkFalse(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, infrav1beta1.MachineDeployingReason, clusterv1.ConditionSeverityInfo, "waiting for commissioning to complete")
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
 			machineScope.Error(err, "unable to create m")
+			// Record the reason as an Event as well as a condition. The condition is only
+			// visible to someone reading the MaasMachine object, so a machine that cannot
+			// deploy - a static IP that is already taken, no eligible host - otherwise looks
+			// stuck with no explanation in the event stream. See PCP-6208.
+			r.Recorder.Eventf(machineScope.MaasMachine, corev1.EventTypeWarning, "MachineDeployFailed", "%s", err.Error())
 			conditions.MarkFalse(machineScope.MaasMachine, infrav1beta1.MachineDeployedCondition, infrav1beta1.MachineDeployFailedReason, clusterv1.ConditionSeverityError, "%s", err.Error())
 			return ctrl.Result{}, err
 		}
