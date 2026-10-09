@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"reflect"
 	"regexp"
 	"strings"
@@ -35,6 +36,10 @@ var (
 )
 
 const (
+	// MAAS IP-range types, as reported by the ipranges endpoint.
+	ipRangeTypeReserved = "reserved"
+	ipRangeTypeDynamic  = "dynamic"
+
 	clusterNamespacePrefix    = "cluster-"
 	clusterNamespacePrefixLen = len(clusterNamespacePrefix)
 	hashIDLength              = 8 // Length of hash-based cluster ID
@@ -1122,8 +1127,8 @@ func (s *Service) setMachineStaticIP(systemID string, config *infrav1beta1.Stati
 // boots and needs manual cleanup; failing here with a message that names the holder is
 // what PCP-6208 asks for.
 //
-// Membership of a reserved range is NOT a conflict and does not fail: see
-// logIfStaticIPInReservedRange for why.
+// Being outside MAAS's freely allocatable space is a separate question, handled by
+// validateStaticIPIsAllocatableSpace below.
 //
 // A nil return means the address is free. A non-nil return is a requeue: the reconciler
 // retries, so a conflict clears by itself once the address is released in MAAS.
@@ -1173,73 +1178,127 @@ func (s *Service) validateStaticIPAvailable(ctx context.Context, ip string) erro
 			ip, subnetID, holder, alloc.AllocType)
 	}
 
-	// Not a conflict, but worth a line in the log: a reserved range is the address space
-	// MAAS keeps out of dynamic allocation, so on a managed subnet it is a normal - not an
-	// erroneous - home for a static address.
-	s.logIfStaticIPInReservedRange(ctx, ip, parsedIP, subnetID)
-
-	return nil
+	// The address is not allocated, but that alone does not make it usable: MAAS also
+	// refuses addresses it holds back for its own purposes.
+	return s.validateStaticIPIsAllocatableSpace(ctx, ip, parsedIP, subnetID)
 }
 
-// findSubnetIDForIP returns the ID of the first MAAS subnet whose CIDR contains ip.
-// IPv4 and IPv6 are both handled, via net.ParseCIDR and net.IPNet.Contains.
+// validateStaticIPIsAllocatableSpace reports whether ip sits in space MAAS will accept a
+// static assignment in. It is the second half of the pre-compose check: GetIPAddresses
+// catches an address that is already taken, this catches one MAAS holds back.
+//
+// MAAS's reserved_ip_ranges endpoint is not the list of user-reserved ranges - it is a
+// computed union of everything excluded from free allocation, tagged by purpose:
+// gateway-ip, dns-server, assigned-ip, reserved and dynamic. Only the "reserved" purpose
+// is a legitimate home for a static address; the rest are the gateway, the DNS server,
+// addresses already handed out, and the DHCP pool. The client does not expose purpose on
+// SubnetIPRange, so the discrimination is done the other way round: an address is usable
+// if MAAS reports it as unreserved, or if it falls in a range explicitly typed
+// "reserved", which is reachable through IPRanges().
+//
+// Fail-closed, like the rest of this check: if the ranges cannot be read we do not know
+// whether the address is usable, and composing on a guess is what this exists to prevent.
+func (s *Service) validateStaticIPIsAllocatableSpace(ctx context.Context, ip string, parsedIP net.IP, subnetID int) error {
+	unreserved, err := s.maasClient.Subnets().GetUnreservedIPRanges(ctx, subnetID)
+	if err != nil {
+		return fmt.Errorf("could not read the unreserved IP ranges of subnet (ID: %d) while checking static IP %s: %w", subnetID, ip, err)
+	}
+
+	for _, r := range unreserved {
+		if ipInRange(r.Start, r.End, parsedIP) {
+			s.scope.V(1).Info("Static IP is in MAAS's freely allocatable space", "ip", ip, "subnetID", subnetID)
+			return nil
+		}
+	}
+
+	// Not in free space. The one acceptable reason for that is an explicitly reserved
+	// range, which is where an operator is meant to park static addresses.
+	ranges, err := s.maasClient.IPRanges().ListBySubnet(ctx, subnetID)
+	if err != nil {
+		return fmt.Errorf("could not read the IP ranges of subnet (ID: %d) while checking static IP %s: %w", subnetID, ip, err)
+	}
+
+	for _, r := range ranges {
+		if !ipInRange(r.StartIP(), r.EndIP(), parsedIP) {
+			continue
+		}
+		switch strings.ToLower(r.Type()) {
+		case ipRangeTypeReserved:
+			s.scope.Info("Static IP is inside a MAAS reserved range, which is the intended home for static addresses - proceeding",
+				"ip", ip, "rangeStart", r.StartIP(), "rangeEnd", r.EndIP(), "subnetID", subnetID, "comment", r.Comment())
+			return nil
+		case ipRangeTypeDynamic:
+			return fmt.Errorf("static IP %s falls inside the DHCP (dynamic) range %s-%s of subnet (ID: %d); "+
+				"MAAS allocates that range itself, so it cannot be used as a static IP - choose an address outside it",
+				ip, r.StartIP(), r.EndIP(), subnetID)
+		}
+	}
+
+	// Held back by MAAS for something we cannot name from the typed ranges - the gateway,
+	// a DNS server, or an address assigned outside this subnet's allocation list.
+	return fmt.Errorf("static IP %s is not in MAAS's allocatable space for subnet (ID: %d) - it is reserved for MAAS's own use "+
+		"(gateway, DNS server, or an already-assigned address); refusing to compose a VM with it - choose a different static IP",
+		ip, subnetID)
+}
+
+// findSubnetIDForIP returns the ID of the MAAS subnet that owns ip, picking the most
+// specific one when several contain it. IPv4 and IPv6 are both handled, via
+// net.ParseCIDR and net.IPNet.Contains.
+//
+// Subnets can nest - a deployment may define 10.11.160.0/24 inside 10.11.160.0/23 - and
+// MAAS records an address against the narrower one. Taking the first subnet that happens
+// to contain the address would depend on the order MAAS lists them, which is neither
+// sorted nor documented; the wrong pick reads a different subnet's allocations and can
+// miss a conflict. Longest prefix wins, which is also how the address is routed.
 func (s *Service) findSubnetIDForIP(ctx context.Context, ip net.IP) (int, error) {
 	allSubnets, err := s.maasClient.Subnets().List(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to list subnets while resolving static IP %s: %w", ip, err)
 	}
 
+	bestID := 0
+	bestPrefix := -1
 	for _, sn := range allSubnets {
 		_, ipNet, parseErr := net.ParseCIDR(sn.CIDR())
 		if parseErr != nil {
 			continue
 		}
-		if ipNet.Contains(ip) {
-			return sn.ID(), nil
+		if !ipNet.Contains(ip) {
+			continue
+		}
+		if prefix, _ := ipNet.Mask.Size(); prefix > bestPrefix {
+			bestPrefix, bestID = prefix, sn.ID()
 		}
 	}
 
-	return 0, fmt.Errorf("static IP %s is not within any subnet known to MAAS; cannot compose VM", ip)
+	if bestPrefix < 0 {
+		return 0, fmt.Errorf("static IP %s is not within any subnet known to MAAS; cannot compose VM", ip)
+	}
+
+	return bestID, nil
 }
 
-// logIfStaticIPInReservedRange notes, at info level, when the requested static IP sits
-// inside a MAAS reserved range. It never changes the caller's outcome.
+// ipInRange reports whether ip falls within [startStr, endStr] inclusive.
 //
-// An earlier revision of this change made it a hard failure, on the reading that a
-// reserved range is space MAAS will not hand out. That reading is inverted: on a managed
-// subnet a reserved range is precisely the space MAAS keeps out of dynamic allocation so
-// that static addresses can live there. Refusing to compose inside one blocks the
-// documented static-IP use case, so the gate is kept only as a diagnostic. Reinstate it
-// as a failure only with evidence that a deployment reserves ranges it does not intend
-// to be used - see the PCP-6208 review notes.
-func (s *Service) logIfStaticIPInReservedRange(ctx context.Context, ip string, parsedIP net.IP, subnetID int) {
-	reservedRanges, err := s.maasClient.Subnets().GetReservedIPRanges(ctx, subnetID)
-	if err != nil {
-		s.scope.V(1).Info("Could not read reserved IP ranges while checking static IP", "ip", ip, "subnetID", subnetID, "err", err.Error())
-		return
-	}
-
-	for _, r := range reservedRanges {
-		if ipInRange(r.Start, r.End, parsedIP) {
-			s.scope.Info("Static IP is inside a MAAS reserved range; reserved ranges are excluded from dynamic allocation and are a normal home for static addresses - composing anyway",
-				"ip", ip, "rangeStart", r.Start, "rangeEnd", r.End, "subnetID", subnetID)
-			return
-		}
-	}
-}
-
-// ipInRange reports whether ip falls within [startStr, endStr] inclusive. IPv4 only:
-// net.IP.To4 returns nil for an IPv6 address, and the ranges MAAS reports through
-// GetReservedIPRanges are IPv4 in practice. The reserved-range diagnostic therefore
-// simply does not fire for IPv6 rather than reporting a false positive.
+// Both address families are handled: the bounds and the address are normalised with
+// netip and compared numerically. An earlier version compared 4-byte forms, which made
+// every IPv6 address read as "outside" every range - harmless while the ranges were only
+// a diagnostic, but it would reject all IPv6 static IPs now that the result gates the
+// compose. Mixed-family comparisons return false rather than a meaningless ordering.
 func ipInRange(startStr, endStr string, ip net.IP) bool {
-	start := net.ParseIP(startStr).To4()
-	end := net.ParseIP(endStr).To4()
-	ip4 := ip.To4()
-	if start == nil || end == nil || ip4 == nil {
+	start, startErr := netip.ParseAddr(startStr)
+	end, endErr := netip.ParseAddr(endStr)
+	addr, ok := netip.AddrFromSlice(ip)
+	if startErr != nil || endErr != nil || !ok {
 		return false
 	}
-	return bytes.Compare(ip4, start) >= 0 && bytes.Compare(ip4, end) <= 0
+
+	start, end, addr = start.Unmap(), end.Unmap(), addr.Unmap()
+	if addr.Is4() != start.Is4() || addr.Is4() != end.Is4() {
+		return false
+	}
+
+	return addr.Compare(start) >= 0 && addr.Compare(end) <= 0
 }
 
 // createBootInterfaceBridge creates a bridge on the boot interface using maas-client-go

@@ -36,12 +36,12 @@ func (f testSubnet) CIDR() string          { return f.cidr }
 // testSubnets serves canned subnet data so the static-IP checks can be exercised
 // without a MAAS server.
 type testSubnets struct {
-	subnets     []maasclient.Subnet
-	listErr     error
-	allocErr    error
-	reservedErr error
-	allocs      map[int][]maasclient.SubnetIPAddress
-	reserved    map[int][]maasclient.SubnetIPRange
+	subnets       []maasclient.Subnet
+	listErr       error
+	allocErr      error
+	unreservedErr error
+	allocs        map[int][]maasclient.SubnetIPAddress
+	unreserved    map[int][]maasclient.SubnetIPRange
 }
 
 func (f testSubnets) List(context.Context) ([]maasclient.Subnet, error) {
@@ -74,21 +74,58 @@ func (f testSubnets) IsIPInUse(_ context.Context, subnetID int, ip string) (bool
 }
 
 func (f testSubnets) GetReservedIPRanges(_ context.Context, subnetID int) ([]maasclient.SubnetIPRange, error) {
-	if f.reservedErr != nil {
-		return nil, f.reservedErr
-	}
-	return f.reserved[subnetID], nil
-}
-
-func (f testSubnets) GetUnreservedIPRanges(context.Context, int) ([]maasclient.SubnetIPRange, error) {
+	// Production code no longer reads this endpoint - it cannot distinguish a
+	// user-reserved range from the DHCP pool or the gateway. The typed ipranges
+	// endpoint is used instead; see validateStaticIPIsAllocatableSpace.
 	return nil, nil
 }
 
-func newStaticIPService(t *testing.T, subnets maasclient.Subnets) *Service {
+func (f testSubnets) GetUnreservedIPRanges(_ context.Context, subnetID int) ([]maasclient.SubnetIPRange, error) {
+	if f.unreservedErr != nil {
+		return nil, f.unreservedErr
+	}
+	return f.unreserved[subnetID], nil
+}
+
+// testIPRange / testIPRanges stand in for the typed ipranges endpoint, which is what
+// distinguishes an operator-reserved range from the DHCP pool.
+type testIPRange struct {
+	typ, start, end, comment string
+}
+
+func (r testIPRange) ID() int                   { return 1 }
+func (r testIPRange) Type() string              { return r.typ }
+func (r testIPRange) StartIP() string           { return r.start }
+func (r testIPRange) EndIP() string             { return r.end }
+func (r testIPRange) Comment() string           { return r.comment }
+func (r testIPRange) Subnet() maasclient.Subnet { return nil }
+
+type testIPRanges struct {
+	ranges map[int][]maasclient.IPRange
+	err    error
+}
+
+func (f testIPRanges) List(context.Context) ([]maasclient.IPRange, error) { return nil, f.err }
+
+func (f testIPRanges) ListBySubnet(_ context.Context, subnetID int) ([]maasclient.IPRange, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.ranges[subnetID], nil
+}
+
+func (f testIPRanges) IsIPInRange(context.Context, int, string) (bool, error) { return false, f.err }
+
+func newStaticIPService(t *testing.T, subnets maasclient.Subnets, ranges ...maasclient.IPRanges) *Service {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	clientSet := mockclientset.NewMockClientSetInterface(ctrl)
 	clientSet.EXPECT().Subnets().Return(subnets).AnyTimes()
+	var ipr maasclient.IPRanges = testIPRanges{}
+	if len(ranges) > 0 {
+		ipr = ranges[0]
+	}
+	clientSet.EXPECT().IPRanges().Return(ipr).AnyTimes()
 	return &Service{
 		scope:      &scope.MachineScope{Logger: klogr.New()},
 		maasClient: clientSet,
@@ -97,18 +134,28 @@ func newStaticIPService(t *testing.T, subnets maasclient.Subnets) *Service {
 
 const testSubnetCIDR = "10.0.0.0/24"
 
+// freeSubnet is a subnet whose whole usable span MAAS reports as unreserved.
+func freeSubnet() testSubnets {
+	return testSubnets{
+		subnets:    []maasclient.Subnet{testSubnet{id: 7, cidr: testSubnetCIDR}},
+		unreserved: map[int][]maasclient.SubnetIPRange{7: {{Start: "10.0.0.2", End: "10.0.0.254"}}},
+	}
+}
+
 func TestValidateStaticIPAvailable(t *testing.T) {
 	tests := []struct {
 		name string
 		// subnets under test
 		subnets testSubnets
-		ip      string
+		// typed ipranges (dynamic vs reserved) for the same subnet
+		ranges testIPRanges
+		ip     string
 		// wantErr is a substring the error must carry; "" means no error expected
 		wantErr string
 	}{
 		{
-			name:    "free address in a known subnet composes",
-			subnets: testSubnets{subnets: []maasclient.Subnet{testSubnet{id: 7, cidr: testSubnetCIDR}}},
+			name:    "address in MAAS's freely allocatable space composes",
+			subnets: freeSubnet(),
 			ip:      "10.0.0.5",
 		},
 		{
@@ -161,29 +208,63 @@ func TestValidateStaticIPAvailable(t *testing.T) {
 			wantErr: "could not read the allocated addresses",
 		},
 		{
-			// MAAS keeps reserved ranges out of dynamic allocation; on a managed
-			// subnet that is where static addresses belong, so it is not a conflict.
-			name: "address inside a reserved range is not treated as a conflict",
+			// An operator-reserved range is the intended home for a static address, so
+			// being outside free space is acceptable when a typed "reserved" range covers it.
+			name: "address in an operator-reserved range composes",
 			subnets: testSubnets{
 				subnets: []maasclient.Subnet{testSubnet{id: 7, cidr: testSubnetCIDR}},
-				reserved: map[int][]maasclient.SubnetIPRange{
-					7: {{Start: "10.0.0.1", End: "10.0.0.20"}},
-				},
 			},
+			ranges: testIPRanges{ranges: map[int][]maasclient.IPRange{
+				7: {testIPRange{typ: "reserved", start: "10.0.0.1", end: "10.0.0.20", comment: "CP static pool"}},
+			}},
 			ip: "10.0.0.5",
 		},
 		{
-			name: "reserved-range lookup failure does not block composition",
+			// The DHCP pool: MAAS allocates it itself, so a static assignment there is refused.
+			name: "address in the dynamic DHCP range is refused",
 			subnets: testSubnets{
-				subnets:     []maasclient.Subnet{testSubnet{id: 7, cidr: testSubnetCIDR}},
-				reservedErr: errors.New("boom"),
+				subnets: []maasclient.Subnet{testSubnet{id: 7, cidr: testSubnetCIDR}},
 			},
-			ip: "10.0.0.5",
+			ranges: testIPRanges{ranges: map[int][]maasclient.IPRange{
+				7: {testIPRange{typ: "dynamic", start: "10.0.0.100", end: "10.0.0.200"}},
+			}},
+			ip:      "10.0.0.150",
+			wantErr: "DHCP (dynamic) range",
 		},
 		{
-			name:    "ipv6 address in a known subnet composes",
-			subnets: testSubnets{subnets: []maasclient.Subnet{testSubnet{id: 9, cidr: "fd00::/64"}}},
-			ip:      "fd00::5",
+			// Gateway / DNS / assigned-elsewhere: held back, with no typed range naming it.
+			name: "address MAAS holds back for its own use is refused",
+			subnets: testSubnets{
+				subnets: []maasclient.Subnet{testSubnet{id: 7, cidr: testSubnetCIDR}},
+			},
+			ip:      "10.0.0.1",
+			wantErr: "reserved for MAAS's own use",
+		},
+		{
+			name: "unreserved-range lookup failure is fail-closed",
+			subnets: testSubnets{
+				subnets:       []maasclient.Subnet{testSubnet{id: 7, cidr: testSubnetCIDR}},
+				unreservedErr: errors.New("boom"),
+			},
+			ip:      "10.0.0.5",
+			wantErr: "could not read the unreserved IP ranges",
+		},
+		{
+			name: "iprange lookup failure is fail-closed",
+			subnets: testSubnets{
+				subnets: []maasclient.Subnet{testSubnet{id: 7, cidr: testSubnetCIDR}},
+			},
+			ranges:  testIPRanges{err: errors.New("boom")},
+			ip:      "10.0.0.5",
+			wantErr: "could not read the IP ranges",
+		},
+		{
+			name: "ipv6 address in free space composes",
+			subnets: testSubnets{
+				subnets:    []maasclient.Subnet{testSubnet{id: 9, cidr: "fd00::/64"}},
+				unreserved: map[int][]maasclient.SubnetIPRange{9: {{Start: "fd00::1", End: "fd00::ffff"}}},
+			},
+			ip: "fd00::5",
 		},
 		{
 			// MAAS may report an equivalent address in a different textual form; a string
@@ -224,7 +305,7 @@ func TestValidateStaticIPAvailable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := newStaticIPService(t, tt.subnets)
+			svc := newStaticIPService(t, tt.subnets, tt.ranges)
 
 			err := svc.validateStaticIPAvailable(context.Background(), tt.ip)
 
@@ -276,7 +357,11 @@ func TestIPInRange(t *testing.T) {
 		{name: "on the upper bound", start: "10.0.0.1", end: "10.0.0.20", ip: "10.0.0.20", want: true},
 		{name: "below", start: "10.0.0.1", end: "10.0.0.20", ip: "10.0.0.0", want: false},
 		{name: "above", start: "10.0.0.1", end: "10.0.0.20", ip: "10.0.0.21", want: false},
-		{name: "ipv6 is out of scope and reports false", start: "fd00::1", end: "fd00::ff", ip: "fd00::5", want: false},
+		{name: "ipv6 inside the range", start: "fd00::1", end: "fd00::ff", ip: "fd00::5", want: true},
+		{name: "ipv6 on the upper bound", start: "fd00::1", end: "fd00::ff", ip: "fd00::ff", want: true},
+		{name: "ipv6 above the range", start: "fd00::1", end: "fd00::ff", ip: "fd00::100", want: false},
+		{name: "mixed families do not compare", start: "10.0.0.1", end: "10.0.0.20", ip: "fd00::5", want: false},
+		{name: "v4-mapped form still matches a v4 range", start: "10.0.0.1", end: "10.0.0.20", ip: "::ffff:10.0.0.5", want: true},
 		{name: "malformed range", start: "nonsense", end: "10.0.0.20", ip: "10.0.0.5", want: false},
 	}
 
@@ -421,5 +506,86 @@ func TestDeployMachineKeepsCommissioningAllocation(t *testing.T) {
 	}
 	if maasMachine.Spec.SystemID == nil || *maasMachine.Spec.SystemID != systemID {
 		t.Errorf("Spec.SystemID was cleared or changed: %v", maasMachine.Spec.SystemID)
+	}
+}
+
+// TestFindSubnetIDForIPPrefersMostSpecific covers nested subnets. The engineering MAAS
+// defines 10.11.160.0/24 inside 10.11.160.0/23 (and 10.10.173.0/24 inside 10.10.128.0/18),
+// and MAAS records an address against the narrower one. Returning whichever subnet happened
+// to come first in the list would read a different subnet's allocations and could miss a
+// conflict; MAAS's list order is neither sorted nor documented. PCP-6208.
+func TestFindSubnetIDForIPPrefersMostSpecific(t *testing.T) {
+	tests := []struct {
+		name    string
+		subnets []maasclient.Subnet
+		ip      string
+		want    int
+	}{
+		{
+			name: "narrower subnet listed first",
+			subnets: []maasclient.Subnet{
+				testSubnet{id: 6, cidr: "10.11.160.0/24"},
+				testSubnet{id: 213, cidr: "10.11.160.0/23"},
+			},
+			ip:   "10.11.160.15",
+			want: 6,
+		},
+		{
+			// The ordering that would break a first-match implementation.
+			name: "wider subnet listed first",
+			subnets: []maasclient.Subnet{
+				testSubnet{id: 213, cidr: "10.11.160.0/23"},
+				testSubnet{id: 6, cidr: "10.11.160.0/24"},
+			},
+			ip:   "10.11.160.15",
+			want: 6,
+		},
+		{
+			name: "deeply nested, wider first",
+			subnets: []maasclient.Subnet{
+				testSubnet{id: 4, cidr: "10.10.128.0/18"},
+				testSubnet{id: 59, cidr: "10.10.173.0/24"},
+			},
+			ip:   "10.10.173.50",
+			want: 59,
+		},
+		{
+			name: "address only the wider subnet covers",
+			subnets: []maasclient.Subnet{
+				testSubnet{id: 59, cidr: "10.10.173.0/24"},
+				testSubnet{id: 4, cidr: "10.10.128.0/18"},
+			},
+			ip:   "10.10.161.120",
+			want: 4,
+		},
+		{
+			name: "unparseable CIDRs are skipped, not fatal",
+			subnets: []maasclient.Subnet{
+				testSubnet{id: 1, cidr: "not-a-cidr"},
+				testSubnet{id: 6, cidr: "10.11.160.0/24"},
+			},
+			ip:   "10.11.160.15",
+			want: 6,
+		},
+		{
+			name:    "ipv6 nesting prefers the longer prefix",
+			subnets: []maasclient.Subnet{testSubnet{id: 20, cidr: "fd00::/48"}, testSubnet{id: 21, cidr: "fd00::/64"}},
+			ip:      "fd00::5",
+			want:    21,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newStaticIPService(t, testSubnets{subnets: tt.subnets}, testIPRanges{})
+
+			got, err := svc.findSubnetIDForIP(context.Background(), net.ParseIP(tt.ip))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("findSubnetIDForIP(%s) = subnet %d, want %d", tt.ip, got, tt.want)
+			}
+		})
 	}
 }
