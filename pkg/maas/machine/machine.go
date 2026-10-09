@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"reflect"
 	"regexp"
 	"strings"
@@ -27,13 +28,18 @@ import (
 
 // Service manages the MaaS machine
 var (
-	ErrBrokenMachine = errors.New("broken machine encountered")
-	ErrVMComposing   = errors.New("vm composing/commissioning")
-	reHostID         = regexp.MustCompile(`host (\d+)`)
-	reMachineID      = regexp.MustCompile(`machine[s]? ([a-z0-9]{4,6})`)
+	ErrBrokenMachine        = errors.New("broken machine encountered")
+	ErrVMComposing          = errors.New("vm composing/commissioning")
+	ErrMachineCommissioning = errors.New("machine is commissioning")
+	reHostID                = regexp.MustCompile(`host (\d+)`)
+	reMachineID             = regexp.MustCompile(`machine[s]? ([a-z0-9]{4,6})`)
 )
 
 const (
+	// MAAS IP-range types, as reported by the ipranges endpoint.
+	ipRangeTypeReserved = "reserved"
+	ipRangeTypeDynamic  = "dynamic"
+
 	clusterNamespacePrefix    = "cluster-"
 	clusterNamespacePrefixLen = len(clusterNamespacePrefix)
 	hashIDLength              = 8 // Length of hash-based cluster ID
@@ -246,6 +252,16 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 
 	defer func() {
 		if rerr != nil {
+			// A machine that is only still commissioning has not failed. Releasing it here
+			// would clear the IDs and point the next reconcile at a different machine, so the
+			// "retry once commissioning completes" wait would never retry the same machine -
+			// it would churn through allocations instead. Keep the allocation and let the
+			// reconcile requeue onto it. PCP-6208.
+			if errors.Is(rerr, ErrMachineCommissioning) {
+				s.scope.Info("Machine is still commissioning; keeping the allocation to retry on the same machine", "system-id", m.SystemID())
+				return
+			}
+
 			s.scope.Info("Attempting to release machine which failed to deploy")
 			_, err := m.Releaser().Release(ctx)
 			if err != nil {
@@ -529,6 +545,18 @@ func (s *Service) PrepareLXDVM(ctx context.Context) (*infrav1beta1.Machine, erro
 			}
 		} else {
 			s.scope.Info("Network configuration ignored: expected exactly 2 subnets, got", "count", len(subnets), "network", networkStr)
+		}
+	}
+
+	// Before composing, make sure the static IP we are about to hand MAAS for this
+	// control-plane VM is actually free. Composing with an address MAAS has already
+	// allocated produces a VM that never comes up and has to be cleaned up by hand, so
+	// fail early with an error that names the conflict instead. See PCP-6208.
+	if s.scope.IsControlPlane() {
+		if staticIPToCheck := s.scope.GetStaticIP(); staticIPToCheck != "" {
+			if err := s.validateStaticIPAvailable(ctx, staticIPToCheck); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -907,8 +935,10 @@ func (s *Service) setMachineStaticIP(systemID string, config *infrav1beta1.Stati
 		// Special handling for Commissioning state: skip static IP configuration to avoid blocking commissioning
 		if machineState == "Commissioning" {
 			s.scope.Info("Machine is commissioning, skipping static IP configuration to avoid interfering with commissioning process. Will configure after commissioning completes", "systemID", systemID)
-			// Return error to requeue - static IP will be configured after commissioning completes
-			return fmt.Errorf("machine is commissioning, static IP configuration will be retried after commissioning completes")
+			// Return a typed error to requeue. The controller recognises it and reports an
+			// info-level condition instead of a deployment failure, so a machine that is
+			// simply still commissioning no longer surfaces as an error in Palette. PCP-6208.
+			return fmt.Errorf("%w: static IP configuration will be retried once commissioning completes", ErrMachineCommissioning)
 		}
 
 		// For other non-allowed states, check if static IP is already correctly configured
@@ -1089,6 +1119,186 @@ func (s *Service) setMachineStaticIP(systemID string, config *infrav1beta1.Stati
 	}
 
 	return nil
+}
+
+// validateStaticIPAvailable reports a conflict if the static IP we are about to ask MAAS
+// to assign is already allocated in its subnet - that is, held by another machine or
+// otherwise tracked as in use. Composing with such an address produces a VM that never
+// boots and needs manual cleanup; failing here with a message that names the holder is
+// what PCP-6208 asks for.
+//
+// Being outside MAAS's freely allocatable space is a separate question, handled by
+// validateStaticIPIsAllocatableSpace below.
+//
+// A nil return means the address is free. A non-nil return is a requeue: the reconciler
+// retries, so a conflict clears by itself once the address is released in MAAS.
+//
+// The check is deliberately fail-closed. If MAAS cannot be reached, or answers with
+// something we cannot interpret, then we do not know whether the address is free - and
+// composing on a guess is the very outcome this check exists to prevent.
+func (s *Service) validateStaticIPAvailable(ctx context.Context, ip string) error {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return fmt.Errorf("static IP %q is not a valid IP address; cannot compose VM", ip)
+	}
+
+	subnetID, err := s.findSubnetIDForIP(ctx, parsedIP)
+	if err != nil {
+		return err
+	}
+
+	s.scope.Info("Checking static IP availability before VM compose", "ip", ip, "subnetID", subnetID)
+
+	allocations, err := s.maasClient.Subnets().GetIPAddresses(ctx, subnetID)
+	if err != nil {
+		return fmt.Errorf("could not read the allocated addresses of subnet (ID: %d) while checking static IP %s: %w", subnetID, ip, err)
+	}
+
+	for _, alloc := range allocations {
+		// Compare parsed addresses, not their text. MAAS may report an address in a
+		// different but equivalent form than the one configured on the machine (for
+		// instance fd00:0:0:0:0:0:0:5 against fd00::5), and a string compare would miss
+		// the conflict and let the compose through.
+		allocIP := net.ParseIP(alloc.IP)
+		if allocIP == nil {
+			// Fail closed: an address we cannot parse is an address we cannot clear.
+			return fmt.Errorf("subnet (ID: %d) reports an allocated address %q that cannot be parsed; "+
+				"refusing to compose a VM with static IP %s while the subnet's allocations are unreadable",
+				subnetID, alloc.IP, ip)
+		}
+		if !allocIP.Equal(parsedIP) {
+			continue
+		}
+		holder := alloc.User
+		if holder == "" {
+			holder = "an unknown owner"
+		}
+		return fmt.Errorf("static IP %s is already allocated in MAAS (subnet ID: %d, owner: %s, alloc type: %d); "+
+			"refusing to compose a VM with it - release the address in MAAS or choose a different static IP",
+			ip, subnetID, holder, alloc.AllocType)
+	}
+
+	// The address is not allocated, but that alone does not make it usable: MAAS also
+	// refuses addresses it holds back for its own purposes.
+	return s.validateStaticIPIsAllocatableSpace(ctx, ip, parsedIP, subnetID)
+}
+
+// validateStaticIPIsAllocatableSpace reports whether ip sits in space MAAS will accept a
+// static assignment in. It is the second half of the pre-compose check: GetIPAddresses
+// catches an address that is already taken, this catches one MAAS holds back.
+//
+// MAAS's reserved_ip_ranges endpoint is not the list of user-reserved ranges - it is a
+// computed union of everything excluded from free allocation, tagged by purpose:
+// gateway-ip, dns-server, assigned-ip, reserved and dynamic. Only the "reserved" purpose
+// is a legitimate home for a static address; the rest are the gateway, the DNS server,
+// addresses already handed out, and the DHCP pool. The client does not expose purpose on
+// SubnetIPRange, so the discrimination is done the other way round: an address is usable
+// if MAAS reports it as unreserved, or if it falls in a range explicitly typed
+// "reserved", which is reachable through IPRanges().
+//
+// Fail-closed, like the rest of this check: if the ranges cannot be read we do not know
+// whether the address is usable, and composing on a guess is what this exists to prevent.
+func (s *Service) validateStaticIPIsAllocatableSpace(ctx context.Context, ip string, parsedIP net.IP, subnetID int) error {
+	unreserved, err := s.maasClient.Subnets().GetUnreservedIPRanges(ctx, subnetID)
+	if err != nil {
+		return fmt.Errorf("could not read the unreserved IP ranges of subnet (ID: %d) while checking static IP %s: %w", subnetID, ip, err)
+	}
+
+	for _, r := range unreserved {
+		if ipInRange(r.Start, r.End, parsedIP) {
+			s.scope.V(1).Info("Static IP is in MAAS's freely allocatable space", "ip", ip, "subnetID", subnetID)
+			return nil
+		}
+	}
+
+	// Not in free space. The one acceptable reason for that is an explicitly reserved
+	// range, which is where an operator is meant to park static addresses.
+	ranges, err := s.maasClient.IPRanges().ListBySubnet(ctx, subnetID)
+	if err != nil {
+		return fmt.Errorf("could not read the IP ranges of subnet (ID: %d) while checking static IP %s: %w", subnetID, ip, err)
+	}
+
+	for _, r := range ranges {
+		if !ipInRange(r.StartIP(), r.EndIP(), parsedIP) {
+			continue
+		}
+		switch strings.ToLower(r.Type()) {
+		case ipRangeTypeReserved:
+			s.scope.Info("Static IP is inside a MAAS reserved range, which is the intended home for static addresses - proceeding",
+				"ip", ip, "rangeStart", r.StartIP(), "rangeEnd", r.EndIP(), "subnetID", subnetID, "comment", r.Comment())
+			return nil
+		case ipRangeTypeDynamic:
+			return fmt.Errorf("static IP %s falls inside the DHCP (dynamic) range %s-%s of subnet (ID: %d); "+
+				"MAAS allocates that range itself, so it cannot be used as a static IP - choose an address outside it",
+				ip, r.StartIP(), r.EndIP(), subnetID)
+		}
+	}
+
+	// Held back by MAAS for something we cannot name from the typed ranges - the gateway,
+	// a DNS server, or an address assigned outside this subnet's allocation list.
+	return fmt.Errorf("static IP %s is not in MAAS's allocatable space for subnet (ID: %d) - it is reserved for MAAS's own use "+
+		"(gateway, DNS server, or an already-assigned address); refusing to compose a VM with it - choose a different static IP",
+		ip, subnetID)
+}
+
+// findSubnetIDForIP returns the ID of the MAAS subnet that owns ip, picking the most
+// specific one when several contain it. IPv4 and IPv6 are both handled, via
+// net.ParseCIDR and net.IPNet.Contains.
+//
+// Subnets can nest - a deployment may define 10.11.160.0/24 inside 10.11.160.0/23 - and
+// MAAS records an address against the narrower one. Taking the first subnet that happens
+// to contain the address would depend on the order MAAS lists them, which is neither
+// sorted nor documented; the wrong pick reads a different subnet's allocations and can
+// miss a conflict. Longest prefix wins, which is also how the address is routed.
+func (s *Service) findSubnetIDForIP(ctx context.Context, ip net.IP) (int, error) {
+	allSubnets, err := s.maasClient.Subnets().List(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to list subnets while resolving static IP %s: %w", ip, err)
+	}
+
+	bestID := 0
+	bestPrefix := -1
+	for _, sn := range allSubnets {
+		_, ipNet, parseErr := net.ParseCIDR(sn.CIDR())
+		if parseErr != nil {
+			continue
+		}
+		if !ipNet.Contains(ip) {
+			continue
+		}
+		if prefix, _ := ipNet.Mask.Size(); prefix > bestPrefix {
+			bestPrefix, bestID = prefix, sn.ID()
+		}
+	}
+
+	if bestPrefix < 0 {
+		return 0, fmt.Errorf("static IP %s is not within any subnet known to MAAS; cannot compose VM", ip)
+	}
+
+	return bestID, nil
+}
+
+// ipInRange reports whether ip falls within [startStr, endStr] inclusive.
+//
+// Both address families are handled: the bounds and the address are normalised with
+// netip and compared numerically. An earlier version compared 4-byte forms, which made
+// every IPv6 address read as "outside" every range - harmless while the ranges were only
+// a diagnostic, but it would reject all IPv6 static IPs now that the result gates the
+// compose. Mixed-family comparisons return false rather than a meaningless ordering.
+func ipInRange(startStr, endStr string, ip net.IP) bool {
+	start, startErr := netip.ParseAddr(startStr)
+	end, endErr := netip.ParseAddr(endStr)
+	addr, ok := netip.AddrFromSlice(ip)
+	if startErr != nil || endErr != nil || !ok {
+		return false
+	}
+
+	start, end, addr = start.Unmap(), end.Unmap(), addr.Unmap()
+	if addr.Is4() != start.Is4() || addr.Is4() != end.Is4() {
+		return false
+	}
+
+	return addr.Compare(start) >= 0 && addr.Compare(end) <= 0
 }
 
 // createBootInterfaceBridge creates a bridge on the boot interface using maas-client-go
