@@ -247,6 +247,16 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 
 	defer func() {
 		if rerr != nil {
+			// A machine that is only still commissioning has not failed. Releasing it here
+			// would clear the IDs and point the next reconcile at a different machine, so the
+			// "retry once commissioning completes" wait would never retry the same machine -
+			// it would churn through allocations instead. Keep the allocation and let the
+			// reconcile requeue onto it. PCP-6208.
+			if errors.Is(rerr, ErrMachineCommissioning) {
+				s.scope.Info("Machine is still commissioning; keeping the allocation to retry on the same machine", "system-id", m.SystemID())
+				return
+			}
+
 			s.scope.Info("Attempting to release machine which failed to deploy")
 			_, err := m.Releaser().Release(ctx)
 			if err != nil {
@@ -1107,9 +1117,13 @@ func (s *Service) setMachineStaticIP(systemID string, config *infrav1beta1.Stati
 }
 
 // validateStaticIPAvailable reports a conflict if the static IP we are about to ask MAAS
-// to assign is already tracked against its subnet - held by another machine, or reserved.
-// Composing with such an address produces a VM that never boots and needs manual cleanup;
-// failing here with a message that names the holder is what PCP-6208 asks for.
+// to assign is already allocated in its subnet - that is, held by another machine or
+// otherwise tracked as in use. Composing with such an address produces a VM that never
+// boots and needs manual cleanup; failing here with a message that names the holder is
+// what PCP-6208 asks for.
+//
+// Membership of a reserved range is NOT a conflict and does not fail: see
+// logIfStaticIPInReservedRange for why.
 //
 // A nil return means the address is free. A non-nil return is a requeue: the reconciler
 // retries, so a conflict clears by itself once the address is released in MAAS.
@@ -1136,7 +1150,18 @@ func (s *Service) validateStaticIPAvailable(ctx context.Context, ip string) erro
 	}
 
 	for _, alloc := range allocations {
-		if alloc.IP != ip {
+		// Compare parsed addresses, not their text. MAAS may report an address in a
+		// different but equivalent form than the one configured on the machine (for
+		// instance fd00:0:0:0:0:0:0:5 against fd00::5), and a string compare would miss
+		// the conflict and let the compose through.
+		allocIP := net.ParseIP(alloc.IP)
+		if allocIP == nil {
+			// Fail closed: an address we cannot parse is an address we cannot clear.
+			return fmt.Errorf("subnet (ID: %d) reports an allocated address %q that cannot be parsed; "+
+				"refusing to compose a VM with static IP %s while the subnet's allocations are unreadable",
+				subnetID, alloc.IP, ip)
+		}
+		if !allocIP.Equal(parsedIP) {
 			continue
 		}
 		holder := alloc.User
