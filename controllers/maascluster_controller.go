@@ -179,7 +179,11 @@ func (r *MaasClusterReconciler) reconcileDNSAttachments(clusterScope *scope.Clus
 			continue
 		}
 
-		machineIP := getExternalMachineIP(m)
+		machineIP, err := selectMachineIPForDNS(m, clusterScope.MaasCluster.Spec.APIServerInterfaceTag, dnssvc)
+		if err != nil {
+			return errors.Wrapf(err, "unable to select IP for machine %q", m.Name)
+		}
+
 		attached := currentIPs.Has(machineIP)
 		isRunningHealthy := IsRunning(m)
 
@@ -200,6 +204,8 @@ func (r *MaasClusterReconciler) reconcileDNSAttachments(clusterScope *scope.Clus
 		//	"Control plane instance %q is de-registered from load balancer", i.ID)
 		//runningIpAddresses = append(runningIpAddresses, m.)
 	}
+
+	clusterScope.MaasCluster.Status.Network.PublishedInterfaceTag = clusterScope.MaasCluster.Spec.APIServerInterfaceTag
 
 	if err := dnssvc.UpdateDNSAttachments(runningIpAddresses); err != nil {
 		return err
@@ -234,6 +240,26 @@ func getExternalMachineIP(machine *infrav1beta1.MaasMachine) string {
 		}
 	}
 	return ""
+}
+
+type apiServerMachineIPResolver interface {
+	GetMachineIPForInterfaceTag(systemID, interfaceTag string) (string, error)
+}
+
+func selectMachineIPForDNS(machine *infrav1beta1.MaasMachine, interfaceTag string, resolver apiServerMachineIPResolver) (string, error) {
+	if interfaceTag == "" {
+		return getExternalMachineIP(machine), nil
+	}
+
+	if machine.Spec.SystemID == nil || *machine.Spec.SystemID == "" {
+		return "", errors.Errorf("systemID not set for machine %q", machine.Name)
+	}
+
+	if resolver == nil {
+		return "", errors.New("machine IP resolver is required")
+	}
+
+	return resolver.GetMachineIPForInterfaceTag(*machine.Spec.SystemID, interfaceTag)
 }
 
 func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope *scope.ClusterScope) (ctrl.Result, error) {
@@ -276,6 +302,14 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 		if errors.Is(err, ErrRequeueDNS) {
 			return ctrl.Result{}, nil
 			//return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+
+		if errors.Is(err, dns.ErrInterfaceTagNotFound) ||
+			errors.Is(err, dns.ErrDuplicateInterfaceTag) ||
+			errors.Is(err, dns.ErrIPv4NotFound) {
+			conditions.Set(maasCluster, metav1.Condition{Type: infrav1beta1.DNSReadyCondition, Status: metav1.ConditionFalse, Reason: infrav1beta1.DNSIPResolutionFailedReason, Message: err.Error()})
+			clusterScope.Info("Unable to resolve DNS IP", "error", err)
+			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 		}
 
 		clusterScope.Error(err, "failed to reconcile load balancer")

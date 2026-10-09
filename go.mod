@@ -10,7 +10,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.32.0
 	github.com/onsi/gomega v1.40.0
 	github.com/pkg/errors v0.9.1
-	github.com/spectrocloud/maas-client-go v0.1.7-beta1
+	github.com/spectrocloud/maas-client-go v0.1.9-beta1
 	github.com/spf13/pflag v1.0.10
 	k8s.io/api v0.35.4
 	k8s.io/apiextensions-apiserver v0.35.4

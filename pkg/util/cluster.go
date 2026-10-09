@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	APIServerReadinessLabel           = "cluster-api-maas/api-server-ready"
+	APIServerReadinessLabel = "cluster-api-maas/api-server-ready"
 )
 
 // HasNamespaceLabel checks if a namespace has a specific label with the expected value

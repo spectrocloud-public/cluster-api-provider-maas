@@ -37,6 +37,13 @@ type MaasClusterSpec struct {
 	// +optional
 	ControlPlaneEndpoint APIEndpoint `json:"controlPlaneEndpoint"`
 
+	// APIServerInterfaceTag specifies which MAAS interface tag should be used to
+	// resolve control-plane machine IPs for API server DNS records (for example:
+	// "control-plane-iface"). When empty, CAPMAAS keeps the legacy behavior and
+	// uses the first MachineExternalIP from machine status.
+	// +optional
+	APIServerInterfaceTag string `json:"apiServerInterfaceTag,omitempty"`
+
 	// FailureDomains are not usually defined on the spec.
 	// but useful for MaaS since we can limit the domains to these
 	// +optional
@@ -128,6 +135,11 @@ type MaasClusterInitializationStatus struct {
 type Network struct {
 	// DNSName is the Kubernetes api server name
 	DNSName string `json:"dnsName,omitempty"`
+
+	// PublishedInterfaceTag is the MAAS interface tag currently used for
+	// API server DNS attachments. When empty, CAPMAAS is using legacy behavior
+	// (first MachineExternalIP from machine status).
+	PublishedInterfaceTag string `json:"publishedInterfaceTag,omitempty"`
 }
 
 // APIEndpoint represents a reachable Kubernetes API endpoint.

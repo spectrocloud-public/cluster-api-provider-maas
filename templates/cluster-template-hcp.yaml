@@ -35,6 +35,8 @@ metadata:
   name: ${CLUSTER_NAME}
 spec:
   dnsDomain: ${DNS_DOMAIN}
+  # Optional: pin API server DNS attachments to an interface tag name (e.g. "control-plane").
+  # apiServerInterfaceTag: control-plane
   failureDomains:
     - ${CONTROL_PLANE_ZONE}
     - default

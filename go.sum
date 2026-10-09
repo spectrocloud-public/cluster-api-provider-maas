@@ -301,8 +301,8 @@ github.com/sirupsen/logrus v1.9.3/go.mod h1:naHLuLoDiP4jHNo9R0sCBMtWGeIprob74mVs
 github.com/soheilhy/cmux v0.1.5/go.mod h1:T7TcVDs9LWfQgPlPsdngu6I6QIoyIFZDDC6sNE1GqG0=
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 h1:+jumHNA0Wrelhe64i8F6HNlS8pkoyMv5sreGx2Ry5Rw=
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8/go.mod h1:3n1Cwaq1E1/1lhQhtRK2ts/ZwZEhjcQeJQ1RuC6Q/8U=
-github.com/spectrocloud/maas-client-go v0.1.7-beta1 h1:j5NtaNPTxoh2PxhKTJYpZUeJukWy4vC7xT2yy+1syDk=
-github.com/spectrocloud/maas-client-go v0.1.7-beta1/go.mod h1:LSxLlmaNCmkaldtysbp7Beq/O2wptBb6qE5iKj+Y7Lw=
+github.com/spectrocloud/maas-client-go v0.1.9-beta1 h1:wyFvb78H8zRs9i/x085ns+mq8y7Rs8KzFLRgx40vPNQ=
+github.com/spectrocloud/maas-client-go v0.1.9-beta1/go.mod h1:LSxLlmaNCmkaldtysbp7Beq/O2wptBb6qE5iKj+Y7Lw=
 github.com/spf13/afero v1.15.0 h1:b/YBCLWAJdFWJTN9cLhiXXcD7mzKn9Dm86dNnfyQw1I=
 github.com/spf13/afero v1.15.0/go.mod h1:NC2ByUVxtQs4b3sIUphxK0NioZnmxgyCrfzeuq8lxMg=
 github.com/spf13/cast v1.10.0 h1:h2x0u2shc1QuLHfxi+cTJvs30+ZAHOGRic8uyGTDWxY=
