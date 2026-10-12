@@ -1,6 +1,6 @@
 module github.com/spectrocloud/cluster-api-provider-maas/lxd-initializer
 
-go 1.26.7
+go 1.26.9
 
 require (
 	github.com/canonical/lxd v0.0.0-20250730070707-c4a122e242bb
