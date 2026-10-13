@@ -54,18 +54,36 @@ authentication; it also unmounts pprof.
 The repo ships a ready ServiceMonitor with these settings at
 `config/prometheus/monitor.yaml` (not wired into `config/default` by default).
 
+## Under Palette there is no opt-out
+
+Palette replaces the manager's `args` wholesale from its own overlay, so
+`--diagnostics-address` and `--insecure-diagnostics` cannot be set on a Palette-managed
+cluster, and a hand edit to the Deployment lasts only until Palette next re-applies it.
+The secure default — TLS on `:8443`, every request authorised with a TokenReview and a
+SubjectAccessReview — is the only mode there. A scraper that read plain HTTP on `:8080`
+must move to `https://…:8443/metrics` with a bearer token for a ServiceAccount bound to the
+shipped `capmaas-metrics-reader` ClusterRole, and skip certificate verification.
+
 ## Collector RBAC (not shipped — apply on demand)
 
 The provider deliberately ships **no** ClusterRole granting access to `/debug/pprof/*` and
-**no** binding. Grant it only for the duration of a collection, then remove it. The existing
-`capmaas-metrics-reader` ClusterRole (shipped) covers `/metrics` only.
+**no** binding. Grant it only for the duration of a collection, then remove it.
+
+The shipped `capmaas-metrics-reader` ClusterRole covers `/metrics` only; a metrics-only
+scraper binds to that. Do not edit it, and do not reuse its name for the collector role
+below: the runbook's `kubectl delete -f` would then delete the shipped role, and Palette
+does not put it back until its next re-apply of the provider.
+
+`CAPMAAS_NS` is the namespace the controller runs in: `cluster-<uid>` for a
+Palette-managed cluster, `cluster-api-provider-maas-system` for the bundle in
+`spectro/generated/`, `capmaas-system` for a `config/default` install.
 
 ```yaml
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: capmaas-pprof-collector
-  namespace: cluster-api-provider-maas-system
+  namespace: CAPMAAS_NS
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -86,40 +104,46 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: capmaas-pprof-collector
-  namespace: cluster-api-provider-maas-system
+  namespace: CAPMAAS_NS
 ```
 
-> The `/debug/pprof/*` wildcard in `nonResourceURLs` matches the sub-paths but **not** the
-> bare `/debug/pprof/` index. Add `"/debug/pprof/"` to the list if you want the index page
-> as well. `/debug/flags/v` is intentionally excluded — it can mutate the running log level.
+> `/debug/flags/v` is intentionally excluded — it can mutate the running log level.
 
 ## Collection runbook
 
-```bash
-NS=cluster-api-provider-maas-system
+The primary path is a port-forward to the Deployment. Palette 4.10 and later no longer
+ship the `capmaas-controller-manager-metrics-service` Service in per-cluster bundles, so
+the Service is optional: use it where it exists, but do not rely on it. From a pod inside
+the cluster network the pod IP works too (`https://<pod-ip>:8443/…`, same `-k` and token).
 
-kubectl apply -f collector-rbac.yaml            # the YAML above
+```bash
+NS=cluster-<uid>    # the controller's namespace; see CAPMAAS_NS above
+
+sed "s/CAPMAAS_NS/$NS/" collector-rbac.yaml | kubectl apply -f -    # the YAML above
 TOKEN=$(kubectl -n "$NS" create token capmaas-pprof-collector --duration=30m)
 
-kubectl -n "$NS" port-forward deploy/capmaas-controller-manager 18443:8443 &
+kubectl -n "$NS" port-forward deploy/capmaas-controller-manager 8443:8443 &
 PF=$!
 
-# -k is required: the endpoint's certificate is self-signed and localhost-only.
+# -k is required: the certificate is self-signed for CN=localhost and no CA is published.
 curl -sk -H "Authorization: Bearer $TOKEN" \
-  https://127.0.0.1:18443/debug/pprof/heap > heap.pb.gz
+  https://localhost:8443/debug/pprof/heap > heap.pb.gz
 curl -sk -H "Authorization: Bearer $TOKEN" \
-  https://127.0.0.1:18443/debug/pprof/allocs > allocs.pb.gz
+  https://localhost:8443/debug/pprof/allocs > allocs.pb.gz
 curl -sk -H "Authorization: Bearer $TOKEN" \
-  "https://127.0.0.1:18443/debug/pprof/goroutine?debug=1" > goroutine.txt
+  "https://localhost:8443/debug/pprof/goroutine?debug=1" > goroutine.txt
 curl -sk -H "Authorization: Bearer $TOKEN" \
-  https://127.0.0.1:18443/metrics > metrics.txt
+  https://localhost:8443/metrics > metrics.txt
 
 kill $PF
-kubectl delete -f collector-rbac.yaml           # revoke when done
+sed "s/CAPMAAS_NS/$NS/" collector-rbac.yaml | kubectl delete -f -   # revoke when done
 
 go tool pprof -top heap.pb.gz
 go tool pprof -top -sample_index=alloc_space allocs.pb.gz
 ```
+
+If local port 8443 is taken, forward another local port (`18443:8443`) and use it in the
+URLs.
 
 Expected status codes, useful when triaging a failed collection:
 
@@ -130,6 +154,17 @@ Expected status codes, useful when triaging a failed collection:
 | token of a ServiceAccount with no matching ClusterRole | `403` |
 | token bound to the collector role above | `200` |
 | `/debug/flags/v` with the collector token | `403` (not granted) |
+
+### The webhook-only copy in `capi-webhook-system` is not a collection target
+
+Palette also runs a webhook-only copy of the manager in `capi-webhook-system`. It binds
+`:8443` too, but it runs as the namespace's `default` ServiceAccount, which is not granted
+`capmaas-proxy-role`, so it cannot create the TokenReview the filter needs: a request
+carrying a token gets `500`, not `401` or `403` (a tokenless request still gets `401`).
+This is expected and deferred. The fix — grant that ServiceAccount `capmaas-proxy-role`, or
+disable the endpoint there with `--diagnostics-address=0` — must ship together with the
+image bump that carries this change, because older images do not have the flag. Collect
+from the controller in the cluster's own namespace instead.
 
 ## Support bundle
 
