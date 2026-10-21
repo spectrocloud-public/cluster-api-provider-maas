@@ -527,16 +527,22 @@ func main() {
 		actionStr = "both" // Default to both init and register
 	}
 
-	// Early exit: if node already marked initialized, skip all work
+	// Early exit: if node already marked initialized, skip all work. The label can go
+	// stale (host reimaged, LXD snap removed), so it is only trusted when LXD is
+	// actually functional - otherwise the node would never re-register with MAAS.
 	if nodeName != "" {
 		if client, err := getKubernetesClient(); err == nil {
 			if node, gerr := client.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{}); gerr == nil {
 				if node.Labels != nil {
 					if node.Labels[LXDHostInitializedLabel] == LabelValueTrue {
-						log.Printf("Node %s already labeled %s=true; skipping initializer", nodeName, LXDHostInitializedLabel)
-						log.Printf("Sleeping for 1 hour to keep the container running")
-						time.Sleep(3600 * time.Second)
-						return
+						if verr := validateLXDFunctional(); verr != nil {
+							log.Printf("Node %s labeled %s=true but LXD is not functional (%v); re-running initializer", nodeName, LXDHostInitializedLabel, verr)
+						} else {
+							log.Printf("Node %s already labeled %s=true; skipping initializer", nodeName, LXDHostInitializedLabel)
+							log.Printf("Sleeping for 1 hour to keep the container running")
+							time.Sleep(3600 * time.Second)
+							return
+						}
 					}
 				}
 			}
