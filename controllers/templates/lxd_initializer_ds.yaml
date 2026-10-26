@@ -31,61 +31,291 @@ spec:
         # Using custom registry to avoid Docker Hub rate limits
         image: us-docker.pkg.dev/palette-images/third-party/ubuntu:22.04
         imagePullPolicy: IfNotPresent
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: LOCK_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: AUTO_REFRESH
+          value: "${AUTO_REFRESH}"
+        - name: LXD_MIN_VERSION
+          value: "5.0.6"
+        - name: LOCK_NAME
+          value: "lxd-initializer"
+        - name: LOCK_TTL_SECONDS
+          value: "600"
         command:
         - /bin/bash
         - -c
         - |
-          set -ex
+          set -euo pipefail
           # LXD 5.0 is the series verified against our MAAS servers. Install from the
           # channel, never a pinned revision: snap revisions are per-architecture, so a
           # single number is not installable everywhere (PCP-7159 reports the old pin,
           # 38113, as unavailable on amd64) and it silently rots as the series moves.
+          # Floor is the CVE fix (5.0.6). The channel still floats forward inside 5.0.
           LXD_CHANNEL=5.0/stable
+          LXD_MIN_VERSION="${LXD_MIN_VERSION:-5.0.6}"
+          AUTO_REFRESH="${AUTO_REFRESH:-true}"
+          LOCK_TTL_SECONDS="${LOCK_TTL_SECONDS:-600}"
+
+          host() { nsenter -t 1 -m -p -- "$@"; }
+
           # Probe the snap binary on the HOST, not `command -v lxd`. This is the one check
           # that has to hold on both supported hosts:
           #   22.04 - nothing named lxd on PATH, so the old check installed correctly
           #   24.04 - ships the lxd-installer deb, whose stub at /usr/sbin/lxd made the
           #           old check succeed with no LXD actually installed
-          # /snap/bin/lxd is what every later command uses, so testing for it is accurate
-          # on both. Uses bash's builtin test so it does not depend on host coreutils.
-          if ! nsenter -t 1 -m -p -- bash -lc 'test -x /snap/bin/lxd'; then
-            echo "Snap LXD not present on host, installing snapd and LXD ${LXD_CHANNEL} on host";
-            # snapd ships with Ubuntu server images, so only install when genuinely
-            # missing - and unpinned, because an exact pin (e.g. 2.60.*) does not exist
-            # on every release.
-            nsenter -t 1 -m -p -- bash -lc 'command -v snap >/dev/null 2>&1 || { export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y snapd; }'
-            # Enable and start snapd on the host
-            nsenter -t 1 -m -p -- systemctl enable --now snapd.socket
-            nsenter -t 1 -m -p -- snap install lxd --channel="${LXD_CHANNEL}" || {
+          snap_lxd_present() { nsenter -t 1 -m -p -- bash -lc 'test -x /snap/bin/lxd'; }
+
+          if ! command -v curl >/dev/null 2>&1; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq && apt-get install -y -qq curl >/dev/null
+          fi
+
+          k8s_api_base() {
+            local host port
+            host="${KUBERNETES_SERVICE_HOST:?KUBERNETES_SERVICE_HOST not set}"
+            port="${KUBERNETES_SERVICE_PORT_HTTPS:-${KUBERNETES_SERVICE_PORT:-443}}"
+            K8S_CURL_RESOLVE="kubernetes.default.svc:${port}:${host}"
+            echo "https://kubernetes.default.svc:${port}"
+          }
+          k8s_curl() {
+            local ca="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+            k8s_api_base >/dev/null
+            curl -sS --cacert "${ca}" --resolve "${K8S_CURL_RESOLVE}" "$@"
+          }
+          version_ge() { printf '%s\n%s\n' "$2" "$1" | sort -C -V; }
+          server_version() {
+            host /snap/bin/lxc version 2>/dev/null | grep -E 'Server version:' | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true
+          }
+          node_label() {
+            local key="$1" token url
+            token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+            url="$(k8s_api_base)/api/v1/nodes/${NODE_NAME}"
+            k8s_curl -H "Authorization: Bearer ${token}" "${url}" 2>/dev/null \
+              | grep -oE "\"${key}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | cut -d'"' -f4 || true
+          }
+          patch_node() {
+            local body="$1" token url
+            token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+            url="$(k8s_api_base)/api/v1/nodes/${NODE_NAME}"
+            k8s_curl --fail -o /dev/null \
+              -H "Authorization: Bearer ${token}" \
+              -H "Content-Type: application/strategic-merge-patch+json" \
+              -X PATCH "${url}" -d "${body}"
+          }
+          label_version() {
+            patch_node "{\"metadata\":{\"labels\":{\"lxdhost.cluster.com/lxd-version\":\"$1\"}}}"
+            echo "Labeled ${NODE_NAME} lxdhost.cluster.com/lxd-version=$1"
+          }
+          mark_status() {
+            local status="$1" detail="$2"
+            patch_node "{\"metadata\":{\"labels\":{\"lxdhost.cluster.com/upgrade-status\":\"${status}\"},\"annotations\":{\"lxdhost.cluster.com/upgrade-detail\":\"${detail}\"}}}" || true
+            echo "Marked ${NODE_NAME} upgrade-status=${status} (${detail})"
+          }
+          any_node_failed() {
+            local token
+            token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+            k8s_curl -H "Authorization: Bearer ${token}" "$(k8s_api_base)/api/v1/nodes" 2>/dev/null \
+              | grep -qE '"lxdhost.cluster.com/upgrade-status"[[:space:]]*:[[:space:]]*"failed'
+          }
+          configure_snap_proxy() {
+            local conf http https
+            conf="/etc/systemd/system/containerd.service.d/http-proxy.conf"
+            if ! host test -f "${conf}"; then
+              return 0
+            fi
+            http="$(host grep -oE 'HTTP_PROXY=[^" ]+' "${conf}" | head -1 | cut -d= -f2- || true)"
+            https="$(host grep -oE 'HTTPS_PROXY=[^" ]+' "${conf}" | head -1 | cut -d= -f2- || true)"
+            if [[ -n "${http}" ]]; then host snap set system proxy.http="${http}" || true; fi
+            if [[ -n "${https}" ]]; then host snap set system proxy.https="${https}" || true; fi
+            echo "snapd proxy set from containerd drop-in"
+          }
+          vm_in_transition() {
+            local states
+            states="$(host /snap/bin/lxc list --project maas -c s -f csv 2>/dev/null || host /snap/bin/lxc list -c s -f csv 2>/dev/null || true)"
+            echo "${states}" | grep -Eiq 'starting|stopping|pending'
+          }
+          acquire_lock() {
+            local token url base body holder code now_micro rv current renew duration now_epoch renew_epoch
+            token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+            base="$(k8s_api_base)"
+            url="${base}/apis/coordination.k8s.io/v1/namespaces/${LOCK_NAMESPACE}/leases/${LOCK_NAME}"
+            holder="${NODE_NAME}"
+            now_micro="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)"
+            body="{\"apiVersion\":\"coordination.k8s.io/v1\",\"kind\":\"Lease\",\"metadata\":{\"name\":\"${LOCK_NAME}\"},\"spec\":{\"holderIdentity\":\"${holder}\",\"leaseDurationSeconds\":${LOCK_TTL_SECONDS},\"acquireTime\":\"${now_micro}\",\"renewTime\":\"${now_micro}\"}}"
+            code=$(k8s_curl -o /tmp/lease.json -w "%{http_code}" -H "Authorization: Bearer ${token}" "${url}" || true)
+            if [[ "${code}" == "404" ]]; then
+              code=$(k8s_curl -o /tmp/lease-create.json -w "%{http_code}" -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -X POST "${base}/apis/coordination.k8s.io/v1/namespaces/${LOCK_NAMESPACE}/leases" -d "${body}" || true)
+              [[ "${code}" == "201" || "${code}" == "200" ]] && return 0
+              [[ "${code}" == "409" ]] && return 1
+              echo "ERROR: lease create HTTP ${code}"
+              return 1
+            fi
+            [[ "${code}" == "200" ]] || return 1
+            current=$(grep -oE '"holderIdentity"[[:space:]]*:[[:space:]]*"[^"]*"' /tmp/lease.json | head -1 | cut -d'"' -f4 || true)
+            renew=$(grep -oE '"renewTime"[[:space:]]*:[[:space:]]*"[^"]*"' /tmp/lease.json | head -1 | cut -d'"' -f4 || true)
+            duration=$(grep -oE '"leaseDurationSeconds"[[:space:]]*:[[:space:]]*[0-9]+' /tmp/lease.json | head -1 | grep -oE '[0-9]+$' || echo "${LOCK_TTL_SECONDS}")
+            rv=$(grep -oE '"resourceVersion"[[:space:]]*:[[:space:]]*"[^"]*"' /tmp/lease.json | head -1 | cut -d'"' -f4 || true)
+            now_epoch=$(date -u +%s)
+            renew_epoch=0
+            if [[ -n "${renew}" ]]; then renew_epoch=$(date -u -d "${renew}" +%s 2>/dev/null || echo 0); fi
+            stale=0
+            if (( now_epoch - renew_epoch > duration )); then stale=1; fi
+            if [[ "${current}" == "${holder}" || -z "${current}" || "${stale}" == "1" ]]; then
+              now_micro="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)"
+              code=$(k8s_curl -o /tmp/lease-patch.json -w "%{http_code}" -H "Authorization: Bearer ${token}" -H "Content-Type: application/strategic-merge-patch+json" -X PATCH "${url}" -d "{\"metadata\":{\"resourceVersion\":\"${rv}\"},\"spec\":{\"holderIdentity\":\"${holder}\",\"leaseDurationSeconds\":${LOCK_TTL_SECONDS},\"renewTime\":\"${now_micro}\"}}" || true)
+              [[ "${code}" == "200" ]] && return 0
+              return 1
+            fi
+            echo "Lease held by ${current:-unknown}; waiting"
+            return 1
+          }
+          release_lock() {
+            local token url
+            token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+            url="$(k8s_api_base)/apis/coordination.k8s.io/v1/namespaces/${LOCK_NAMESPACE}/leases/${LOCK_NAME}"
+            k8s_curl -o /dev/null -H "Authorization: Bearer ${token}" -H "Content-Type: application/strategic-merge-patch+json" -X PATCH "${url}" -d "{\"spec\":{\"holderIdentity\":\"\"}}" || true
+          }
+
+          install_if_missing() {
+            if snap_lxd_present; then
+              return 0
+            fi
+            echo "Snap LXD not present on host, installing snapd and LXD ${LXD_CHANNEL} on host"
+            host bash -lc 'command -v snap >/dev/null 2>&1 || { export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y snapd; }'
+            host systemctl enable --now snapd.socket
+            configure_snap_proxy
+            host snap install lxd --channel="${LXD_CHANNEL}" || {
               echo "ERROR: Failed to install LXD from channel ${LXD_CHANNEL}"
               exit 1
             }
+          }
+
+          PREV="$(node_label lxdhost.cluster.com/upgrade-status || true)"
+          if [[ "${PREV}" == failed* ]]; then
+            echo "ERROR: ${NODE_NAME} has upgrade-status=${PREV}. Clear the label after investigation."
+            exit 1
           fi
-          # Hold snap to prevent updates off the verified series
-          nsenter -t 1 -m -p -- snap refresh --hold lxd || true
-          echo "Ensuring LXD daemon is running on host";
-          # Start/enable via snap (avoid systemd invocation from the pod)
-          nsenter -t 1 -m -p -- snap start --enable lxd.daemon || true
-          # Wait for LXD to report readiness (up to 5 minutes)
-          echo "Waiting for LXD to become ready on host (timeout 5 min)…"
-          if ! nsenter -t 1 -m -p -- /snap/bin/lxd waitready --timeout 300 ; then
-            echo "LXD did not become ready after 5 minutes"; exit 1;
-          fi
-          # Verify the series only after waitready - `lxc version` cannot report a
-          # server version until the daemon is up.
-          LXD_VERSION=$(nsenter -t 1 -m -p -- /snap/bin/lxd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-          LXC_CLIENT=$(nsenter -t 1 -m -p -- /snap/bin/lxc version 2>&1 | grep "Client version:" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-          LXC_SERVER=$(nsenter -t 1 -m -p -- /snap/bin/lxc version 2>&1 | grep "Server version:" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-          echo "Host LXD is ready - LXD version: ${LXD_VERSION}, LXC client: ${LXC_CLIENT}, LXC server: ${LXC_SERVER}";
-          # Warn, don't exit - waitready already proved LXD works, and a host that came
-          # up on another 5.x should not start crashlooping. A real incompatibility
-          # surfaces in the lxd-initializer container at MAAS registration.
-          for v in "${LXD_VERSION}" "${LXC_CLIENT}" "${LXC_SERVER}"; do
-            case "${v}" in
-              5.0.*) ;;
-              *) echo "WARNING: expected LXD 5.0.x, got LXD:${LXD_VERSION} LXC-client:${LXC_CLIENT} LXC-server:${LXC_SERVER}"; break ;;
-            esac
+          while [[ "$(node_label lxdhost.cluster.com/defer-refresh || true)" == "true" ]]; do
+            echo "Host is being repaved; not refreshing LXD on ${NODE_NAME}"
+            sleep 30
           done
+
+          install_if_missing
+          configure_snap_proxy
+          host snap refresh --hold lxd || true
+          echo "Ensuring LXD daemon is running on host"
+          host snap start --enable lxd.daemon || true
+          echo "Waiting for LXD to become ready on host (timeout 5 min)…"
+          if ! host /snap/bin/lxd waitready --timeout 300; then
+            echo "LXD did not become ready after 5 minutes"; exit 1
+          fi
+
+          if [[ "${AUTO_REFRESH}" == "false" ]]; then
+            echo "autoRefresh is false; leaving the installed snap unchanged"
+            exit 0
+          fi
+
+          while vm_in_transition; do
+            echo "A VM on ${NODE_NAME} is starting, stopping, or pending; waiting"
+            sleep 30
+          done
+
+          CUR="$(server_version)"
+          echo "Current LXC Server version: ${CUR:-unknown}"
+          if [[ -n "${CUR}" ]] && version_ge "${CUR}" "${LXD_MIN_VERSION}"; then
+            label_version "${CUR}"
+            exit 0
+          fi
+          while any_node_failed; do
+            echo "LXD refresh paused; another node has upgrade-status=failed-*"
+            sleep 30
+          done
+
+          if ! host snap changes >/dev/null 2>&1; then
+            echo "ERROR: snapd not responsive — refresh would be treated as host shutdown and stop every VM"
+            exit 1
+          fi
+          FREE_KB="$(host df -Pk / | awk 'NR==2{print $4}')"
+          if [[ "${FREE_KB}" -lt 512000 ]]; then
+            echo "ERROR: insufficient free space for snap + core22 (${FREE_KB}KB)"; exit 1
+          fi
+          JMARK="lxd-initializer-jcheck-${NODE_NAME}-$(date -u +%s)"
+          host systemd-cat -t lxd-initializer echo "${JMARK}" || true
+          sleep 3
+          if ! host journalctl --no-pager --since "-2 min" 2>/dev/null | grep -qF "${JMARK}"; then
+            echo "ERROR: journal capture not working; refusing to refresh blind"; exit 1
+          fi
+
+          echo "Waiting for cluster lease ${LOCK_NAME}"
+          LOCK_WAITED=0
+          until acquire_lock; do
+            sleep 15
+            LOCK_WAITED=$((LOCK_WAITED + 15))
+            if (( LOCK_WAITED > 3600 )); then
+              echo "ERROR: could not acquire lease within 3600s"
+              exit 1
+            fi
+          done
+          trap release_lock EXIT
+
+          if any_node_failed; then
+            echo "A node failed verification while we waited for the lease; not refreshing"
+            exit 0
+          fi
+          CUR="$(server_version)"
+          if [[ -n "${CUR}" ]] && version_ge "${CUR}" "${LXD_MIN_VERSION}"; then
+            label_version "${CUR}"
+            exit 0
+          fi
+          if vm_in_transition; then
+            echo "A VM entered a transitional state under the lease; not refreshing"
+            exit 0
+          fi
+
+          host bash -lc "ps -eo pid,comm | grep '[q]emu' | awk '{print \$1}' | sort" > /tmp/qemu-pids.pre || true
+          REFRESH_SINCE="$(host date -u -Is)"
+          echo "Refreshing LXD to ${LXD_CHANNEL} (server ${CUR:-unknown} is below ${LXD_MIN_VERSION})"
+          host snap refresh --unhold lxd || true
+          if ! host snap refresh lxd --channel="${LXD_CHANNEL}"; then
+            host snap refresh --hold lxd || true
+            mark_status "failed-refresh" "snap refresh failed on ${NODE_NAME}"
+            exit 1
+          fi
+          host snap refresh --hold lxd || true
+          if ! host /snap/bin/lxd waitready --timeout 300; then
+            mark_status "failed-not-ready" "LXD did not become ready after refresh"
+            exit 1
+          fi
+          NEW="$(server_version)"
+          if [[ -z "${NEW}" ]] || ! version_ge "${NEW}" "${LXD_MIN_VERSION}"; then
+            mark_status "failed-version" "server ${NEW:-unknown} is below ${LXD_MIN_VERSION}"
+            exit 1
+          fi
+          STOP_REASON="$(host journalctl -u snap.lxd.daemon --since "${REFRESH_SINCE}" --no-pager 2>/dev/null | grep -F 'Stop reason' | tail -1 || true)"
+          echo "Daemon stop line: ${STOP_REASON:-<none>}"
+          if echo "${STOP_REASON}" | grep -qi 'host shutdown'; then
+            mark_status "failed-host-shutdown" "refresh stopped instances on ${NODE_NAME}"
+            exit 1
+          fi
+          if [[ -z "${STOP_REASON}" ]] || ! echo "${STOP_REASON}" | grep -qi 'snap refresh'; then
+            mark_status "failed-stop-reason" "unexpected stop reason: ${STOP_REASON:-absent}"
+            exit 1
+          fi
+          host bash -lc "ps -eo pid,comm | grep '[q]emu' | awk '{print \$1}' | sort" > /tmp/qemu-pids.post || true
+          if [[ -s /tmp/qemu-pids.pre ]] && ! diff -q /tmp/qemu-pids.pre /tmp/qemu-pids.post >/dev/null; then
+            mark_status "failed-vm-restarted" "qemu PID set changed during refresh"
+            exit 1
+          fi
+          label_version "${NEW}"
+          mark_status "ok" "${CUR:-unknown} -> ${NEW}"
+          echo "LXD refresh complete on ${NODE_NAME}: ${CUR:-?} -> ${NEW}"
         securityContext:
           privileged: true
         volumeMounts:

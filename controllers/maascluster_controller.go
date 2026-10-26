@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -429,6 +430,18 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 			clusterScope.Error(err, "failed to reconcile LXD hosts")
 			conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError, "%s", err.Error())
 			return reconcile.Result{}, err
+		}
+		targetNodes := &corev1.NodeList{}
+		if err := remoteClient.List(context.Background(), targetNodes); err == nil {
+			if failed := lxdRefreshFailedNodeNames(targetNodes.Items); len(failed) > 0 {
+				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError,
+					"LXD refresh failed on %s. Clear lxdhost.cluster.com/upgrade-status on that node after investigation.", strings.Join(failed, ", "))
+				clusterScope.Info("LXD refresh failed; Palette reconcile is not blocked", "nodes", failed)
+				return ctrl.Result{RequeueAfter: time.Minute}, nil
+			}
+			if lxdAutoRefreshEnabled(maasCluster) && !lxdRefreshSettled(targetNodes.Items, true) {
+				return ctrl.Result{RequeueAfter: time.Minute}, nil
+			}
 		}
 		conditions.MarkTrue(maasCluster, infrav1beta1.LXDReadyCondition)
 		clusterScope.Info("LXD hosts are available")

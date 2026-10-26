@@ -55,6 +55,11 @@ type LXDConfig struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
+	// AutoRefresh refreshes an installed LXD snap when its server version is below the floor.
+	// Nil or true refreshes. False still installs LXD when the snap is absent.
+	// +optional
+	AutoRefresh *bool `json:"autoRefresh,omitempty"`
+
 	// ResourcePool specifies the MAAS resource pool to use for LXD VM hosts
 	// +optional
 	ResourcePool string `json:"resourcePool,omitempty"`

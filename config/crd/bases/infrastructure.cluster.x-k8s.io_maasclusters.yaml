@@ -70,6 +70,12 @@ spec:
               lxdConfig:
                 description: LXDConfig contains the configuration for LXD hosts
                 properties:
+                  autoRefresh:
+                    description: |-
+                      AutoRefresh refreshes an installed LXD snap when its server
+                      version is below the floor. Nil or true refreshes. False still
+                      installs LXD when the snap is absent.
+                    type: boolean
                   enabled:
                     default: false
                     description: Enabled specifies whether to enable LXD VM support

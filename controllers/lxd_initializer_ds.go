@@ -12,13 +12,26 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/yaml"
 
+	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
+	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/maintenance"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/scope"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/util"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/util/trust"
+)
+
+const (
+	lxdInitializedLabel      = "lxdhost.cluster.com/initialized"
+	lxdVersionLabel          = "lxdhost.cluster.com/lxd-version"
+	lxdUpgradeStatusLabel    = "lxdhost.cluster.com/upgrade-status"
+	lxdDeferRefreshLabel     = "lxdhost.cluster.com/defer-refresh"
+	lxdAutoRefreshAnnotation = "infrastructure.cluster.x-k8s.io/lxd-auto-refresh"
+	lxdMinServerVersion      = "5.0.6"
 )
 
 //go:embed templates/lxd_initializer_ds.yaml.processed
@@ -61,12 +74,17 @@ func (r *MaasClusterReconciler) ensureLXDInitializerDS(ctx context.Context, clus
 
 	// Gate: derive desired CP count from MaasCloudConfig; fallback to KCP
 	desiredCP, _ := r.computeDesiredControlPlane(ctx, dsNamespace, cluster.Name)
+	autoRefresh := lxdAutoRefreshEnabled(cluster)
+
+	if err := r.syncLXDDeferRefresh(ctx, cluster.Namespace, cluster.Name, remoteClient); err != nil {
+		r.Log.Error(err, "failed to sync LXD defer-refresh labels", "namespace", dsNamespace)
+	}
 
 	// New gate: proceed if any node needs initialization. This avoids deadlock during upgrades
 	// when an old node is NotReady due to HMC constraints but new nodes must be initialized.
-	if !r.anyNodeNeedsInitialization(ctx, remoteClient) {
+	if !r.anyNodeNeedsInitialization(ctx, remoteClient, autoRefresh) {
 		r.Log.Info("All nodes already labeled initialized; considering DS cleanup", "namespace", dsNamespace, "ds", dsName)
-		if done, err := r.maybeShortCircuitDelete(ctx, remoteClient, dsNamespace, desiredCP, dsName); err != nil {
+		if done, err := r.maybeShortCircuitDelete(ctx, remoteClient, dsNamespace, desiredCP, dsName, autoRefresh); err != nil {
 			r.Log.Error(err, "failed to maybe short circuit delete", "namespace", dsNamespace, "ds", dsName)
 			return err
 		} else if done {
@@ -93,7 +111,7 @@ func (r *MaasClusterReconciler) ensureLXDInitializerDS(ctx context.Context, clus
 		return fmt.Errorf("failed to ensure LXD initializer RBAC: %v", err)
 	}
 
-	if done, err := r.maybeShortCircuitDelete(ctx, remoteClient, dsNamespace, desiredCP, dsName); err != nil {
+	if done, err := r.maybeShortCircuitDelete(ctx, remoteClient, dsNamespace, desiredCP, dsName, autoRefresh); err != nil {
 		r.Log.Error(err, "failed to maybe short circuit delete", "namespace", dsNamespace, "ds", dsName)
 		return err
 	} else if done {
@@ -172,8 +190,19 @@ func (r *MaasClusterReconciler) ensureLXDInitializerRBACOnTarget(ctx context.Con
 			obj.SetNamespace(namespace)
 		}
 
-		// Create or update the resource on target cluster
-		_, err := controllerutil.CreateOrPatch(ctx, remoteClient, obj, func() error { return nil })
+		// CreateOrPatch fetches the live object before mutate, so copy the desired
+		// rules onto it. An empty mutate leaves an already-installed ClusterRole
+		// without the lease permission the refresh needs.
+		desired := obj.DeepCopy()
+		_, err := controllerutil.CreateOrPatch(ctx, remoteClient, obj, func() error {
+			if rules, ok := desired.Object["rules"]; ok {
+				obj.Object["rules"] = rules
+			}
+			if roleRef, ok := desired.Object["roleRef"]; ok {
+				obj.Object["roleRef"] = roleRef
+			}
+			return nil
+		})
 		if err != nil {
 			return fmt.Errorf("failed to create/patch %s %s: %v", obj.GetKind(), obj.GetName(), err)
 		}
@@ -254,7 +283,7 @@ func (r *MaasClusterReconciler) enoughNodesReady(ctx context.Context, remoteClie
 
 // anyNodeNeedsInitialization returns true if any node (control-plane or worker) needs initialization.
 // Only checks Ready nodes to avoid false positives from nodes that aren't ready yet.
-func (r *MaasClusterReconciler) anyNodeNeedsInitialization(ctx context.Context, remoteClient client.Client) bool {
+func (r *MaasClusterReconciler) anyNodeNeedsInitialization(ctx context.Context, remoteClient client.Client, autoRefresh bool) bool {
 	nodeList := &corev1.NodeList{}
 	// Check all nodes, not just control-plane, to include worker nodes
 	if err := remoteClient.List(ctx, nodeList); err != nil {
@@ -276,8 +305,8 @@ func (r *MaasClusterReconciler) anyNodeNeedsInitialization(ctx context.Context, 
 			}
 		}
 
-		// If node is Ready but not initialized, it needs initialization
-		if isReady && (n.Labels == nil || n.Labels["lxdhost.cluster.com/initialized"] != "true") {
+		// If node is Ready but not initialized, or it is below the LXD floor, it needs work.
+		if isReady && nodeNeedsLXDWork(n, autoRefresh) {
 			// Determine node role for logging
 			nodeRole := "worker"
 			if n.Labels != nil && n.Labels["node-role.kubernetes.io/control-plane"] != "" {
@@ -288,7 +317,7 @@ func (r *MaasClusterReconciler) anyNodeNeedsInitialization(ctx context.Context, 
 		}
 
 		// If node is not Ready yet but has the label, log a warning (might be stale)
-		if !isReady && n.Labels != nil && n.Labels["lxdhost.cluster.com/initialized"] == "true" {
+		if !isReady && n.Labels != nil && n.Labels[lxdInitializedLabel] == "true" {
 			r.Log.Info("Node has initialization label but is not Ready - may need re-initialization", "node", n.Name)
 		}
 	}
@@ -314,34 +343,24 @@ func (r *MaasClusterReconciler) deleteExistingInitializerDS(ctx context.Context,
 
 // maybeShortCircuitDelete deletes the DS if all nodes are already initialized
 // BUT only if we have exactly desiredCP nodes - avoids deleting during maintenance when new nodes are joining
-func (r *MaasClusterReconciler) maybeShortCircuitDelete(ctx context.Context, remoteClient client.Client, namespace string, desiredCP int32, dsName string) (bool, error) {
+func (r *MaasClusterReconciler) maybeShortCircuitDelete(ctx context.Context, remoteClient client.Client, namespace string, desiredCP int32, dsName string, autoRefresh bool) (bool, error) {
 	shortCircuitNodes := &corev1.NodeList{}
 	// Check all nodes, not just control-plane
 	if err := remoteClient.List(ctx, shortCircuitNodes); err != nil || len(shortCircuitNodes.Items) == 0 {
 		return false, nil
 	}
 
-	initCount := 0
 	readyCount := 0
 	for _, n := range shortCircuitNodes.Items {
-		// Check if node is Ready
-		for _, condition := range n.Status.Conditions {
-			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
-				readyCount++
-				break
-			}
-		}
-
-		// Check if node is initialized
-		if n.Labels != nil && n.Labels["lxdhost.cluster.com/initialized"] == "true" {
-			initCount++
+		if nodeIsReady(n) {
+			readyCount++
 		}
 	}
 
-	// Delete initializer DS only when ALL nodes (control-plane + worker) are initialized.
-	// This matches the new requirement to register both CP and worker nodes.
+	// Delete the DS only when every node is initialized and, when refresh is on,
+	// every ready node is at or above the floor with no failed verification.
 	totalNodes := len(shortCircuitNodes.Items)
-	if totalNodes > 0 && initCount == totalNodes {
+	if lxdRefreshSettled(shortCircuitNodes.Items, autoRefresh) {
 		shortCircuitDSList := &appsv1.DaemonSetList{}
 		if err := remoteClient.List(ctx, shortCircuitDSList, client.InNamespace(namespace), client.MatchingLabels{"app": dsName}); err == nil {
 			for _, ds := range shortCircuitDSList.Items {
@@ -349,7 +368,7 @@ func (r *MaasClusterReconciler) maybeShortCircuitDelete(ctx context.Context, rem
 			}
 		}
 		r.Log.Info("Deleted LXD initializer DaemonSet - all nodes initialized",
-			"desiredCP", desiredCP, "totalNodes", totalNodes, "readyNodes", readyCount, "initializedNodes", initCount)
+			"desiredCP", desiredCP, "totalNodes", totalNodes, "readyNodes", readyCount)
 		return true, nil
 	}
 	return false, nil
@@ -382,6 +401,11 @@ func (r *MaasClusterReconciler) renderDaemonSetForCluster(clusterScope *scope.Cl
 	// Deterministic per-cluster trust password derived from cluster UID
 	tp := trust.DeriveTrustPassword(string(cluster.UID))
 
+	auto := "true"
+	if !lxdAutoRefreshEnabled(cluster) {
+		auto = "false"
+	}
+
 	rendered := render(map[string]string{
 		"${STORAGE_BACKEND}":     sb,
 		"${STORAGE_SIZE}":        ss,
@@ -390,6 +414,7 @@ func (r *MaasClusterReconciler) renderDaemonSetForCluster(clusterScope *scope.Cl
 		"${TRUST_PASSWORD}":      tp,
 		"${NIC_TYPE}":            nt,
 		"${NIC_PARENT}":          np,
+		"${AUTO_REFRESH}":        auto,
 	}, lxdInitTemplate)
 
 	ds := &appsv1.DaemonSet{}
@@ -408,4 +433,186 @@ func (r *MaasClusterReconciler) renderDaemonSetForCluster(clusterScope *scope.Cl
 	ds.Namespace = namespace
 
 	return ds, nil
+}
+
+// lxdAutoRefreshEnabled reports whether an installed snap below the floor should be refreshed.
+// The spec field wins. The annotation is how Palette pack values opt out before the module bump.
+func lxdAutoRefreshEnabled(cluster *infrav1beta1.MaasCluster) bool {
+	if cluster != nil && cluster.Spec.LXDConfig != nil && cluster.Spec.LXDConfig.AutoRefresh != nil {
+		return *cluster.Spec.LXDConfig.AutoRefresh
+	}
+	if cluster != nil && cluster.Annotations != nil && strings.EqualFold(cluster.Annotations[lxdAutoRefreshAnnotation], "false") {
+		return false
+	}
+	return true
+}
+
+func nodeIsReady(n corev1.Node) bool {
+	for _, condition := range n.Status.Conditions {
+		if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+// nodeNeedsLXDWork is true when a Ready node still needs install or an in-place refresh.
+func nodeNeedsLXDWork(n corev1.Node, autoRefresh bool) bool {
+	if n.Labels == nil || n.Labels[lxdInitializedLabel] != "true" {
+		return true
+	}
+	if !autoRefresh {
+		return false
+	}
+	if strings.HasPrefix(n.Labels[lxdUpgradeStatusLabel], "failed") {
+		return true
+	}
+	if n.Labels[lxdDeferRefreshLabel] == "true" {
+		return true
+	}
+	return lxdVersionBelowFloor(n.Labels[lxdVersionLabel])
+}
+
+// lxdRefreshSettled is true when the DaemonSet can be removed.
+func lxdRefreshSettled(nodes []corev1.Node, autoRefresh bool) bool {
+	if len(nodes) == 0 {
+		return false
+	}
+	for _, n := range nodes {
+		if n.Labels == nil || n.Labels[lxdInitializedLabel] != "true" {
+			return false
+		}
+		if !autoRefresh || !nodeIsReady(n) {
+			continue
+		}
+		if strings.HasPrefix(n.Labels[lxdUpgradeStatusLabel], "failed") || n.Labels[lxdDeferRefreshLabel] == "true" {
+			return false
+		}
+		if lxdVersionBelowFloor(n.Labels[lxdVersionLabel]) {
+			return false
+		}
+	}
+	return true
+}
+
+func lxdVersionBelowFloor(version string) bool {
+	if version == "" {
+		return true
+	}
+	return compareDotVersions(version, lxdMinServerVersion) < 0
+}
+
+func compareDotVersions(a, b string) int {
+	as := splitDotVersion(a)
+	bs := splitDotVersion(b)
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		av, bv := 0, 0
+		if i < len(as) {
+			av = as[i]
+		}
+		if i < len(bs) {
+			bv = bs[i]
+		}
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+	}
+	return 0
+}
+
+func splitDotVersion(v string) []int {
+	parts := strings.Split(v, ".")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n := 0
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				break
+			}
+			n = n*10 + int(c-'0')
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+func lxdRefreshFailedNodeNames(nodes []corev1.Node) []string {
+	var names []string
+	for _, n := range nodes {
+		if n.Labels != nil && strings.HasPrefix(n.Labels[lxdUpgradeStatusLabel], "failed") {
+			names = append(names, n.Name)
+		}
+	}
+	return names
+}
+
+// syncLXDDeferRefresh marks target nodes whose bare metal is being replaced so the
+// initializer pod waits instead of refreshing LXD under a repave.
+func (r *MaasClusterReconciler) syncLXDDeferRefresh(ctx context.Context, namespace, clusterName string, remoteClient client.Client) error {
+	deferNodes := map[string]struct{}{}
+
+	machines := &infrav1beta1.MaasMachineList{}
+	if err := r.Client.List(ctx, machines, client.InNamespace(namespace), client.MatchingLabels{
+		clusterv1.ClusterNameLabel: clusterName,
+	}); err != nil {
+		return err
+	}
+	for i := range machines.Items {
+		mm := &machines.Items[i]
+		if mm.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(mm, maintenance.HostEvacuationFinalizer) {
+			continue
+		}
+		machine := &clusterv1.Machine{}
+		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: mm.Name}, machine); err != nil {
+			continue
+		}
+		if machine.Status.NodeRef.Name != "" {
+			deferNodes[machine.Status.NodeRef.Name] = struct{}{}
+		}
+	}
+
+	if st, _, err := maintenance.LoadSession(ctx, r.Client, namespace); err == nil && st.Status == maintenance.StatusActive && st.CurrentHost != "" {
+		nodeList := &corev1.NodeList{}
+		if err := remoteClient.List(ctx, nodeList); err == nil {
+			suffix := "/" + st.CurrentHost
+			for _, n := range nodeList.Items {
+				if strings.HasSuffix(n.Spec.ProviderID, suffix) {
+					deferNodes[n.Name] = struct{}{}
+				}
+			}
+		}
+	}
+
+	nodeList := &corev1.NodeList{}
+	if err := remoteClient.List(ctx, nodeList); err != nil {
+		return err
+	}
+	for i := range nodeList.Items {
+		n := &nodeList.Items[i]
+		_, want := deferNodes[n.Name]
+		has := n.Labels != nil && n.Labels[lxdDeferRefreshLabel] == "true"
+		if want == has {
+			continue
+		}
+		orig := n.DeepCopy()
+		if n.Labels == nil {
+			n.Labels = map[string]string{}
+		}
+		if want {
+			n.Labels[lxdDeferRefreshLabel] = "true"
+		} else {
+			delete(n.Labels, lxdDeferRefreshLabel)
+		}
+		if err := remoteClient.Patch(ctx, n, client.MergeFrom(orig)); err != nil {
+			r.Log.Error(err, "failed to patch defer-refresh label", "node", n.Name)
+		}
+	}
+	return nil
 }
