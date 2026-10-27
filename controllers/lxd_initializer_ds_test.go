@@ -31,6 +31,8 @@ func TestEnsureLXDScript(t *testing.T) {
 		{name: "floor proves the CVE fix", fragment: "LXD_MIN_VERSION:-5.0.7", want: true},
 		{name: "tested refresh target", fragment: "LXD_APPROVED_VERSIONS:-5.0.10", want: true},
 		{name: "reads the refresh target from the channel", fragment: "snap info lxd", want: true},
+		{name: "retries a failed store read before the long wait", fragment: "(attempt ${attempt}/4)", want: true},
+		{name: "keeps the store error for the log", fragment: "snap info lxd 2>/dev/null", want: false},
 		{name: "refreshes to the resolved revision", fragment: "snap refresh lxd --revision=\"${TARGET_REV}\"", want: true},
 		{name: "keeps tracking the tested channel", fragment: "snap switch --channel=\"${LXD_CHANNEL}\" lxd", want: true},
 		{name: "verifies the exact version installed", fragment: "\"${NEW}\" != \"${TARGET_VERSION}\"", want: true},

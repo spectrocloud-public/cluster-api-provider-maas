@@ -103,9 +103,23 @@ spec:
           # Prints "<version> <revision>" that LXD_CHANNEL offers for this host's
           # architecture, e.g. "5.0.10 40911" from
           # "  5.0/stable:  5.0.10-24fe763 2026-09-25 (40911) 121MB -".
+          # Store errors are often transient (every pod of the DaemonSet queries the
+          # store at the same moment, usually through one proxy), so retry briefly
+          # before falling back to the long wait, and log what snap reported.
           channel_candidate() {
-            host snap info lxd 2>/dev/null | awk -v ch="${LXD_CHANNEL}:" '
-              $1 == ch { rev = $4; gsub(/[()]/, "", rev); split($2, v, "-"); print v[1], rev; exit }'
+            local out line attempt
+            for attempt in 1 2 3 4; do
+              out="$(host snap info lxd 2>&1)" || true
+              line="$(awk -v ch="${LXD_CHANNEL}:" '
+                $1 == ch { rev = $4; gsub(/[()]/, "", rev); split($2, v, "-"); print v[1], rev; exit }' <<< "${out}")"
+              if [[ -n "${line}" ]]; then
+                echo "${line}"
+                return 0
+              fi
+              echo "snap info lxd gave no ${LXD_CHANNEL} entry (attempt ${attempt}/4): $(head -c 300 <<< "${out}" | tr '\n' ' ')" >&2
+              (( attempt < 4 )) && sleep $(( attempt * 15 ))
+            done
+            return 1
           }
           version_approved() {
             local want="$1" v
