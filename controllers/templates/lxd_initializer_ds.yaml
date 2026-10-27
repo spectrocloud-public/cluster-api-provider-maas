@@ -43,7 +43,9 @@ spec:
         - name: AUTO_REFRESH
           value: "${AUTO_REFRESH}"
         - name: LXD_MIN_VERSION
-          value: "5.0.6"
+          value: "${LXD_MIN_VERSION}"
+        - name: LXD_APPROVED_VERSIONS
+          value: "${LXD_APPROVED_VERSIONS}"
         - name: LOCK_NAME
           value: "lxd-initializer"
         - name: LOCK_TTL_SECONDS
@@ -53,15 +55,20 @@ spec:
         - -c
         - |
           set -euo pipefail
-          # LXD 5.0 is the series verified against our MAAS servers. Install from the
-          # channel, never a pinned revision: snap revisions are per-architecture, so a
-          # single number is not installable everywhere (PCP-7159 reports the old pin,
-          # 38113, as unavailable on amd64) and it silently rots as the series moves.
-          # Floor is the CVE fix (5.0.6). The channel still floats forward inside 5.0.
+          # LXD 5.0 is the series verified against our MAAS servers. Never hardcode a
+          # revision: snap revisions are per-architecture, so a single number is not
+          # installable everywhere (PCP-7159 reports the old pin, 38113, as unavailable
+          # on amd64). A refresh reads the revision the channel offers on this host.
+          # The floor is the first server version that proves the CVE-2026-28384 fix.
+          # 5.0.6 is not enough: the original 5.0.6 release reports the same version
+          # without the fix, which only shipped in the interim snap 5.0.6-e49d9f4.
+          # A refresh installs only an approved version, never just the channel tip.
           LXD_CHANNEL=5.0/stable
-          LXD_MIN_VERSION="${LXD_MIN_VERSION:-5.0.6}"
+          LXD_MIN_VERSION="${LXD_MIN_VERSION:-5.0.7}"
+          LXD_APPROVED_VERSIONS="${LXD_APPROVED_VERSIONS:-5.0.10}"
           AUTO_REFRESH="${AUTO_REFRESH:-true}"
           LOCK_TTL_SECONDS="${LOCK_TTL_SECONDS:-600}"
+          BLOCKED_STATUS=blocked-untested
 
           host() { nsenter -t 1 -m -p -- "$@"; }
 
@@ -92,6 +99,52 @@ spec:
           version_ge() { printf '%s\n%s\n' "$2" "$1" | sort -C -V; }
           server_version() {
             host /snap/bin/lxc version 2>/dev/null | grep -E 'Server version:' | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true
+          }
+          # Prints "<version> <revision>" that LXD_CHANNEL offers for this host's
+          # architecture, e.g. "5.0.10 40911" from
+          # "  5.0/stable:  5.0.10-24fe763 2026-09-25 (40911) 121MB -".
+          channel_candidate() {
+            host snap info lxd 2>/dev/null | awk -v ch="${LXD_CHANNEL}:" '
+              $1 == ch { rev = $4; gsub(/[()]/, "", rev); split($2, v, "-"); print v[1], rev; exit }'
+          }
+          version_approved() {
+            local want="$1" v
+            local -a list
+            IFS=',' read -ra list <<< "${LXD_APPROVED_VERSIONS}"
+            for v in "${list[@]}"; do
+              [[ "${v// /}" == "${want}" ]] && return 0
+            done
+            return 1
+          }
+          installed_revision() {
+            host snap list lxd 2>/dev/null | awk 'NR == 2 { print $3 }'
+          }
+          # Sets CAND_VERSION / CAND_REV and succeeds only when the channel offers an
+          # approved version that moves this host forward past the floor. Otherwise it
+          # records upgrade-status=blocked-untested, which pauses this host but not others.
+          resolve_target() {
+            local cur="$1" line
+            CAND_VERSION=""
+            CAND_REV=""
+            line="$(channel_candidate || true)"
+            read -r CAND_VERSION CAND_REV <<< "${line}" || true
+            if [[ -z "${CAND_VERSION}" || -z "${CAND_REV}" ]]; then
+              echo "Could not read ${LXD_CHANNEL} from the snap store; retrying"
+              return 1
+            fi
+            if ! version_ge "${CAND_VERSION}" "${LXD_MIN_VERSION}"; then
+              mark_status "${BLOCKED_STATUS}" "${LXD_CHANNEL} offers ${CAND_VERSION}, below floor ${LXD_MIN_VERSION}"
+              return 1
+            fi
+            if [[ -n "${cur}" ]] && version_ge "${cur}" "${CAND_VERSION}"; then
+              mark_status "${BLOCKED_STATUS}" "${LXD_CHANNEL} offers ${CAND_VERSION}, not newer than server ${cur}"
+              return 1
+            fi
+            if ! version_approved "${CAND_VERSION}"; then
+              mark_status "${BLOCKED_STATUS}" "${LXD_CHANNEL} offers ${CAND_VERSION}; approved: ${LXD_APPROVED_VERSIONS}"
+              return 1
+            fi
+            return 0
           }
           node_label() {
             local key="$1" token url
@@ -231,8 +284,19 @@ spec:
           echo "Current LXC Server version: ${CUR:-unknown}"
           if [[ -n "${CUR}" ]] && version_ge "${CUR}" "${LXD_MIN_VERSION}"; then
             label_version "${CUR}"
+            if [[ "${PREV}" == "${BLOCKED_STATUS}" ]]; then
+              mark_status "ok" "server ${CUR} meets floor ${LXD_MIN_VERSION}"
+            fi
             exit 0
           fi
+
+          # Wait here, outside the lease, until the channel offers an approved version.
+          # New approvals arrive as a DaemonSet change, which restarts this pod.
+          until resolve_target "${CUR}"; do
+            sleep 600
+          done
+          echo "Refresh target: ${CAND_VERSION} revision ${CAND_REV} from ${LXD_CHANNEL}"
+
           while any_node_failed; do
             echo "LXD refresh paused; another node has upgrade-status=failed-*"
             sleep 30
@@ -278,24 +342,33 @@ spec:
             echo "A VM entered a transitional state under the lease; not refreshing"
             exit 0
           fi
+          TARGET_VERSION="${CAND_VERSION}"
+          TARGET_REV="${CAND_REV}"
+          if ! resolve_target "${CUR}" || [[ "${CAND_REV}" != "${TARGET_REV}" ]]; then
+            echo "${LXD_CHANNEL} moved while waiting for the lease; retrying from the start"
+            exit 1
+          fi
 
           host bash -lc "ps -eo pid,comm | grep '[q]emu' | awk '{print \$1}' | sort" > /tmp/qemu-pids.pre || true
           REFRESH_SINCE="$(host date -u -Is)"
-          echo "Refreshing LXD to ${LXD_CHANNEL} (server ${CUR:-unknown} is below ${LXD_MIN_VERSION})"
+          echo "Refreshing LXD to ${TARGET_VERSION} revision ${TARGET_REV} (server ${CUR:-unknown} is below ${LXD_MIN_VERSION})"
           host snap refresh --unhold lxd || true
-          if ! host snap refresh lxd --channel="${LXD_CHANNEL}"; then
+          if ! host snap refresh lxd --revision="${TARGET_REV}"; then
             host snap refresh --hold lxd || true
-            mark_status "failed-refresh" "snap refresh failed on ${NODE_NAME}"
+            mark_status "failed-refresh" "snap refresh to revision ${TARGET_REV} failed on ${NODE_NAME}"
             exit 1
           fi
+          # --revision leaves tracking alone; keep the host on the tested track.
+          host snap switch --channel="${LXD_CHANNEL}" lxd || true
           host snap refresh --hold lxd || true
           if ! host /snap/bin/lxd waitready --timeout 300; then
             mark_status "failed-not-ready" "LXD did not become ready after refresh"
             exit 1
           fi
           NEW="$(server_version)"
-          if [[ -z "${NEW}" ]] || ! version_ge "${NEW}" "${LXD_MIN_VERSION}"; then
-            mark_status "failed-version" "server ${NEW:-unknown} is below ${LXD_MIN_VERSION}"
+          NEW_REV="$(installed_revision || true)"
+          if [[ "${NEW}" != "${TARGET_VERSION}" || "${NEW_REV}" != "${TARGET_REV}" ]]; then
+            mark_status "failed-version" "expected ${TARGET_VERSION} rev ${TARGET_REV}, got ${NEW:-unknown} rev ${NEW_REV:-unknown}"
             exit 1
           fi
           STOP_REASON="$(host journalctl -u snap.lxd.daemon --since "${REFRESH_SINCE}" --no-pager 2>/dev/null | grep -F 'Stop reason' | tail -1 || true)"

@@ -60,6 +60,16 @@ type LXDConfig struct {
 	// +optional
 	AutoRefresh *bool `json:"autoRefresh,omitempty"`
 
+	// MinVersion raises the LXD server version below which a host is refreshed.
+	// A value below the floor built into CAPMAAS is ignored.
+	// +optional
+	MinVersion string `json:"minVersion,omitempty"`
+
+	// ApprovedVersions adds LXD versions that a refresh may install, on top of the
+	// versions built into CAPMAAS. A refresh waits when the channel offers anything else.
+	// +optional
+	ApprovedVersions []string `json:"approvedVersions,omitempty"`
+
 	// ResourcePool specifies the MAAS resource pool to use for LXD VM hosts
 	// +optional
 	ResourcePool string `json:"resourcePool,omitempty"`

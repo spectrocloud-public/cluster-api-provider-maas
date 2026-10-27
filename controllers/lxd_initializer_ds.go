@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	// embed template
@@ -30,9 +31,30 @@ const (
 	lxdVersionLabel          = "lxdhost.cluster.com/lxd-version"
 	lxdUpgradeStatusLabel    = "lxdhost.cluster.com/upgrade-status"
 	lxdDeferRefreshLabel     = "lxdhost.cluster.com/defer-refresh"
+	lxdUpgradeDetailAnnot    = "lxdhost.cluster.com/upgrade-detail"
 	lxdAutoRefreshAnnotation = "infrastructure.cluster.x-k8s.io/lxd-auto-refresh"
-	lxdMinServerVersion      = "5.0.6"
+	lxdMinVersionAnnotation  = "infrastructure.cluster.x-k8s.io/lxd-min-version"
+	lxdApprovedAnnotation    = "infrastructure.cluster.x-k8s.io/lxd-approved-versions"
+	lxdBlockedStatus         = "blocked-untested"
+
+	// lxdMinServerVersion is the first 5.0 server version that reports the
+	// CVE-2026-28384 fix. The fix shipped as interim snap 5.0.6-e49d9f4, and the
+	// original 5.0.6 release reports the same server version without it.
+	lxdMinServerVersion = "5.0.7"
 )
+
+// lxdTestedVersions are the 5.0 server versions validated against MAAS 3.6/3.7 as an
+// in-place refresh target. A refresh installs only one of these.
+var lxdTestedVersions = []string{"5.0.10"}
+
+var lxdVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
+
+// lxdVersionPolicy decides whether a host is refreshed and what it may be refreshed to.
+type lxdVersionPolicy struct {
+	AutoRefresh bool
+	Floor       string
+	Approved    []string
+}
 
 //go:embed templates/lxd_initializer_ds.yaml.processed
 var lxdInitTemplate string
@@ -74,7 +96,7 @@ func (r *MaasClusterReconciler) ensureLXDInitializerDS(ctx context.Context, clus
 
 	// Gate: derive desired CP count from MaasCloudConfig; fallback to KCP
 	desiredCP, _ := r.computeDesiredControlPlane(ctx, dsNamespace, cluster.Name)
-	autoRefresh := lxdAutoRefreshEnabled(cluster)
+	policy := lxdPolicyFor(cluster)
 
 	if err := r.syncLXDDeferRefresh(ctx, cluster.Namespace, cluster.Name, remoteClient); err != nil {
 		r.Log.Error(err, "failed to sync LXD defer-refresh labels", "namespace", dsNamespace)
@@ -82,9 +104,9 @@ func (r *MaasClusterReconciler) ensureLXDInitializerDS(ctx context.Context, clus
 
 	// New gate: proceed if any node needs initialization. This avoids deadlock during upgrades
 	// when an old node is NotReady due to HMC constraints but new nodes must be initialized.
-	if !r.anyNodeNeedsInitialization(ctx, remoteClient, autoRefresh) {
+	if !r.anyNodeNeedsInitialization(ctx, remoteClient, policy) {
 		r.Log.Info("All nodes already labeled initialized; considering DS cleanup", "namespace", dsNamespace, "ds", dsName)
-		if done, err := r.maybeShortCircuitDelete(ctx, remoteClient, dsNamespace, desiredCP, dsName, autoRefresh); err != nil {
+		if done, err := r.maybeShortCircuitDelete(ctx, remoteClient, dsNamespace, desiredCP, dsName, policy); err != nil {
 			r.Log.Error(err, "failed to maybe short circuit delete", "namespace", dsNamespace, "ds", dsName)
 			return err
 		} else if done {
@@ -111,7 +133,7 @@ func (r *MaasClusterReconciler) ensureLXDInitializerDS(ctx context.Context, clus
 		return fmt.Errorf("failed to ensure LXD initializer RBAC: %v", err)
 	}
 
-	if done, err := r.maybeShortCircuitDelete(ctx, remoteClient, dsNamespace, desiredCP, dsName, autoRefresh); err != nil {
+	if done, err := r.maybeShortCircuitDelete(ctx, remoteClient, dsNamespace, desiredCP, dsName, policy); err != nil {
 		r.Log.Error(err, "failed to maybe short circuit delete", "namespace", dsNamespace, "ds", dsName)
 		return err
 	} else if done {
@@ -283,7 +305,7 @@ func (r *MaasClusterReconciler) enoughNodesReady(ctx context.Context, remoteClie
 
 // anyNodeNeedsInitialization returns true if any node (control-plane or worker) needs initialization.
 // Only checks Ready nodes to avoid false positives from nodes that aren't ready yet.
-func (r *MaasClusterReconciler) anyNodeNeedsInitialization(ctx context.Context, remoteClient client.Client, autoRefresh bool) bool {
+func (r *MaasClusterReconciler) anyNodeNeedsInitialization(ctx context.Context, remoteClient client.Client, policy lxdVersionPolicy) bool {
 	nodeList := &corev1.NodeList{}
 	// Check all nodes, not just control-plane, to include worker nodes
 	if err := remoteClient.List(ctx, nodeList); err != nil {
@@ -306,7 +328,7 @@ func (r *MaasClusterReconciler) anyNodeNeedsInitialization(ctx context.Context, 
 		}
 
 		// If node is Ready but not initialized, or it is below the LXD floor, it needs work.
-		if isReady && nodeNeedsLXDWork(n, autoRefresh) {
+		if isReady && nodeNeedsLXDWork(n, policy) {
 			// Determine node role for logging
 			nodeRole := "worker"
 			if n.Labels != nil && n.Labels["node-role.kubernetes.io/control-plane"] != "" {
@@ -343,7 +365,7 @@ func (r *MaasClusterReconciler) deleteExistingInitializerDS(ctx context.Context,
 
 // maybeShortCircuitDelete deletes the DS if all nodes are already initialized
 // BUT only if we have exactly desiredCP nodes - avoids deleting during maintenance when new nodes are joining
-func (r *MaasClusterReconciler) maybeShortCircuitDelete(ctx context.Context, remoteClient client.Client, namespace string, desiredCP int32, dsName string, autoRefresh bool) (bool, error) {
+func (r *MaasClusterReconciler) maybeShortCircuitDelete(ctx context.Context, remoteClient client.Client, namespace string, desiredCP int32, dsName string, policy lxdVersionPolicy) (bool, error) {
 	shortCircuitNodes := &corev1.NodeList{}
 	// Check all nodes, not just control-plane
 	if err := remoteClient.List(ctx, shortCircuitNodes); err != nil || len(shortCircuitNodes.Items) == 0 {
@@ -360,7 +382,7 @@ func (r *MaasClusterReconciler) maybeShortCircuitDelete(ctx context.Context, rem
 	// Delete the DS only when every node is initialized and, when refresh is on,
 	// every ready node is at or above the floor with no failed verification.
 	totalNodes := len(shortCircuitNodes.Items)
-	if lxdRefreshSettled(shortCircuitNodes.Items, autoRefresh) {
+	if lxdRefreshSettled(shortCircuitNodes.Items, policy) {
 		shortCircuitDSList := &appsv1.DaemonSetList{}
 		if err := remoteClient.List(ctx, shortCircuitDSList, client.InNamespace(namespace), client.MatchingLabels{"app": dsName}); err == nil {
 			for _, ds := range shortCircuitDSList.Items {
@@ -401,20 +423,23 @@ func (r *MaasClusterReconciler) renderDaemonSetForCluster(clusterScope *scope.Cl
 	// Deterministic per-cluster trust password derived from cluster UID
 	tp := trust.DeriveTrustPassword(string(cluster.UID))
 
+	policy := lxdPolicyFor(cluster)
 	auto := "true"
-	if !lxdAutoRefreshEnabled(cluster) {
+	if !policy.AutoRefresh {
 		auto = "false"
 	}
 
 	rendered := render(map[string]string{
-		"${STORAGE_BACKEND}":     sb,
-		"${STORAGE_SIZE}":        ss,
-		"${NETWORK_BRIDGE}":      nb,
-		"${SKIP_NETWORK_UPDATE}": skip,
-		"${TRUST_PASSWORD}":      tp,
-		"${NIC_TYPE}":            nt,
-		"${NIC_PARENT}":          np,
-		"${AUTO_REFRESH}":        auto,
+		"${STORAGE_BACKEND}":       sb,
+		"${STORAGE_SIZE}":          ss,
+		"${NETWORK_BRIDGE}":        nb,
+		"${SKIP_NETWORK_UPDATE}":   skip,
+		"${TRUST_PASSWORD}":        tp,
+		"${NIC_TYPE}":              nt,
+		"${NIC_PARENT}":            np,
+		"${AUTO_REFRESH}":          auto,
+		"${LXD_MIN_VERSION}":       policy.Floor,
+		"${LXD_APPROVED_VERSIONS}": strings.Join(policy.Approved, ","),
 	}, lxdInitTemplate)
 
 	ds := &appsv1.DaemonSet{}
@@ -456,12 +481,60 @@ func nodeIsReady(n corev1.Node) bool {
 	return false
 }
 
+// lxdPolicyFor builds the refresh policy for a cluster. Spec fields win over the
+// annotations Palette writes from pack values. Overrides can raise the floor and add
+// approved versions; they cannot lower the floor or drop the built-in tested versions.
+func lxdPolicyFor(cluster *infrav1beta1.MaasCluster) lxdVersionPolicy {
+	policy := lxdVersionPolicy{
+		AutoRefresh: lxdAutoRefreshEnabled(cluster),
+		Floor:       lxdMinServerVersion,
+	}
+
+	var cfg *infrav1beta1.LXDConfig
+	var annotations map[string]string
+	if cluster != nil {
+		cfg = cluster.Spec.LXDConfig
+		annotations = cluster.Annotations
+	}
+
+	floor := ""
+	if cfg != nil && cfg.MinVersion != "" {
+		floor = cfg.MinVersion
+	} else if annotations != nil {
+		floor = annotations[lxdMinVersionAnnotation]
+	}
+	floor = strings.TrimSpace(floor)
+	if lxdVersionPattern.MatchString(floor) && compareDotVersions(floor, policy.Floor) > 0 {
+		policy.Floor = floor
+	}
+
+	var extra []string
+	if cfg != nil && len(cfg.ApprovedVersions) > 0 {
+		extra = cfg.ApprovedVersions
+	} else if annotations != nil && annotations[lxdApprovedAnnotation] != "" {
+		extra = strings.Split(annotations[lxdApprovedAnnotation], ",")
+	}
+	seen := map[string]struct{}{}
+	for _, v := range append(append([]string{}, lxdTestedVersions...), extra...) {
+		v = strings.TrimSpace(v)
+		if !lxdVersionPattern.MatchString(v) {
+			continue
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		policy.Approved = append(policy.Approved, v)
+	}
+	return policy
+}
+
 // nodeNeedsLXDWork is true when a Ready node still needs install or an in-place refresh.
-func nodeNeedsLXDWork(n corev1.Node, autoRefresh bool) bool {
+func nodeNeedsLXDWork(n corev1.Node, policy lxdVersionPolicy) bool {
 	if n.Labels == nil || n.Labels[lxdInitializedLabel] != "true" {
 		return true
 	}
-	if !autoRefresh {
+	if !policy.AutoRefresh {
 		return false
 	}
 	if strings.HasPrefix(n.Labels[lxdUpgradeStatusLabel], "failed") {
@@ -470,11 +543,11 @@ func nodeNeedsLXDWork(n corev1.Node, autoRefresh bool) bool {
 	if n.Labels[lxdDeferRefreshLabel] == "true" {
 		return true
 	}
-	return lxdVersionBelowFloor(n.Labels[lxdVersionLabel])
+	return lxdVersionBelowFloor(n.Labels[lxdVersionLabel], policy.Floor)
 }
 
 // lxdRefreshSettled is true when the DaemonSet can be removed.
-func lxdRefreshSettled(nodes []corev1.Node, autoRefresh bool) bool {
+func lxdRefreshSettled(nodes []corev1.Node, policy lxdVersionPolicy) bool {
 	if len(nodes) == 0 {
 		return false
 	}
@@ -482,24 +555,24 @@ func lxdRefreshSettled(nodes []corev1.Node, autoRefresh bool) bool {
 		if n.Labels == nil || n.Labels[lxdInitializedLabel] != "true" {
 			return false
 		}
-		if !autoRefresh || !nodeIsReady(n) {
+		if !policy.AutoRefresh || !nodeIsReady(n) {
 			continue
 		}
 		if strings.HasPrefix(n.Labels[lxdUpgradeStatusLabel], "failed") || n.Labels[lxdDeferRefreshLabel] == "true" {
 			return false
 		}
-		if lxdVersionBelowFloor(n.Labels[lxdVersionLabel]) {
+		if lxdVersionBelowFloor(n.Labels[lxdVersionLabel], policy.Floor) {
 			return false
 		}
 	}
 	return true
 }
 
-func lxdVersionBelowFloor(version string) bool {
+func lxdVersionBelowFloor(version, floor string) bool {
 	if version == "" {
 		return true
 	}
-	return compareDotVersions(version, lxdMinServerVersion) < 0
+	return compareDotVersions(version, floor) < 0
 }
 
 func compareDotVersions(a, b string) int {
@@ -551,6 +624,21 @@ func lxdRefreshFailedNodeNames(nodes []corev1.Node) []string {
 		}
 	}
 	return names
+}
+
+// lxdRefreshBlockedNodes lists nodes whose refresh is waiting for an approved version,
+// with the detail the initializer recorded (what the channel offers).
+func lxdRefreshBlockedNodes(nodes []corev1.Node) (names []string, detail string) {
+	for _, n := range nodes {
+		if n.Labels == nil || n.Labels[lxdUpgradeStatusLabel] != lxdBlockedStatus {
+			continue
+		}
+		names = append(names, n.Name)
+		if detail == "" && n.Annotations != nil {
+			detail = n.Annotations[lxdUpgradeDetailAnnot]
+		}
+	}
+	return names, detail
 }
 
 // syncLXDDeferRefresh marks target nodes whose bare metal is being replaced so the

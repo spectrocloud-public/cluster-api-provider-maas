@@ -98,4 +98,7 @@ const (
 
 	// LXDSetupPendingReason documents LXD host setup in progress
 	LXDSetupPendingReason = "LXDSetupPending"
+
+	// LXDRefreshBlockedReason documents a refresh waiting because the channel offers an unapproved LXD version
+	LXDRefreshBlockedReason = "LXDRefreshBlocked"
 )

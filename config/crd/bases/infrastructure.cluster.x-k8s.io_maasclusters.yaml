@@ -70,6 +70,13 @@ spec:
               lxdConfig:
                 description: LXDConfig contains the configuration for LXD hosts
                 properties:
+                  approvedVersions:
+                    description: |-
+                      ApprovedVersions adds LXD versions that a refresh may install, on top of the
+                      versions built into CAPMAAS. A refresh waits when the channel offers anything else.
+                    items:
+                      type: string
+                    type: array
                   autoRefresh:
                     description: |-
                       AutoRefresh refreshes an installed LXD snap when its server
@@ -80,6 +87,11 @@ spec:
                     default: false
                     description: Enabled specifies whether to enable LXD VM support
                     type: boolean
+                  minVersion:
+                    description: |-
+                      MinVersion raises the LXD server version below which a host is refreshed.
+                      A value below the floor built into CAPMAAS is ignored.
+                    type: string
                   networkBridge:
                     description: NetworkBridge specifies the network bridge to use
                       (legacy, prefer NICParent)
