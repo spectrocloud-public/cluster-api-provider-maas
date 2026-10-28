@@ -448,14 +448,17 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 				clusterScope.Info("LXD refresh failed; Palette reconcile is not blocked", "nodes", failed)
 				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
 			}
-			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items); len(blocked) > 0 {
+			// With autoRefresh off the DaemonSet is gone and nothing clears a blocked
+			// label, so a stale one must not hold LXDReady at False.
+			policy := lxdPolicyFor(maasCluster)
+			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items); policy.AutoRefresh && len(blocked) > 0 {
 				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDRefreshBlockedReason, clusterv1.ConditionSeverityWarning,
 					"LXD refresh on %s is waiting for an approved version (%s). Add it to cloud.maas.lxd.approvedVersions after validating it with MAAS.",
 					strings.Join(blocked, ", "), detail)
 				clusterScope.Info("LXD refresh waiting for an approved version; Palette reconcile is not blocked", "nodes", blocked, "detail", detail)
 				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
 			}
-			if policy := lxdPolicyFor(maasCluster); policy.AutoRefresh && !lxdRefreshSettled(targetNodes.Items, policy) {
+			if policy.AutoRefresh && !lxdRefreshSettled(targetNodes.Items, policy) {
 				return ctrl.Result{RequeueAfter: lxdRefreshActiveRequeue}, nil
 			}
 		}

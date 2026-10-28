@@ -180,16 +180,35 @@ spec:
             patch_node "{\"metadata\":{\"labels\":{\"lxdhost.cluster.com/lxd-version\":\"$1\"}}}"
             echo "Labeled ${NODE_NAME} lxdhost.cluster.com/lxd-version=$1"
           }
+          status_patch() {
+            echo "{\"metadata\":{\"labels\":{\"lxdhost.cluster.com/upgrade-status\":\"$1\"},\"annotations\":{\"lxdhost.cluster.com/upgrade-detail\":\"$2\"}}}"
+          }
           mark_status() {
             local status="$1" detail="$2"
-            patch_node "{\"metadata\":{\"labels\":{\"lxdhost.cluster.com/upgrade-status\":\"${status}\"},\"annotations\":{\"lxdhost.cluster.com/upgrade-detail\":\"${detail}\"}}}" || true
+            patch_node "$(status_patch "${status}" "${detail}")" || true
             echo "Marked ${NODE_NAME} upgrade-status=${status} (${detail})"
           }
+          # A failure has to be on the node before the lease is released. Otherwise other
+          # hosts keep refreshing, and a restarted pod finds the new version and never
+          # repeats the check that failed.
+          mark_failed() {
+            local status="$1" detail="$2"
+            until patch_node "$(status_patch "${status}" "${detail}")"; do
+              echo "Could not record upgrade-status=${status} on ${NODE_NAME}; retrying" >&2
+              sleep 10
+            done
+            echo "Marked ${NODE_NAME} upgrade-status=${status} (${detail})"
+          }
+          # Succeeds when a node reports upgrade-status=failed-*, and also when the node
+          # list cannot be read: the queue moves only when it is known to be clear.
           any_node_failed() {
-            local token
+            local token nodes
             token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-            k8s_curl -H "Authorization: Bearer ${token}" "$(k8s_api_base)/api/v1/nodes" 2>/dev/null \
-              | grep -qE '"lxdhost.cluster.com/upgrade-status"[[:space:]]*:[[:space:]]*"failed'
+            if ! nodes="$(k8s_curl --fail -H "Authorization: Bearer ${token}" "$(k8s_api_base)/api/v1/nodes" 2>&1)"; then
+              echo "Could not list nodes ($(head -c 200 <<< "${nodes}")); treating the refresh queue as paused" >&2
+              return 0
+            fi
+            grep -qE '"lxdhost.cluster.com/upgrade-status"[[:space:]]*:[[:space:]]*"failed' <<< "${nodes}"
           }
           configure_snap_proxy() {
             local conf http https
@@ -243,11 +262,31 @@ spec:
             echo "Lease held by ${current:-unknown}; waiting"
             return 1
           }
+          # A refresh plus its readiness wait can outlast LOCK_TTL_SECONDS, and a stale
+          # lease lets the next host start refreshing alongside this one.
+          start_lease_renewal() {
+            ( while sleep $(( LOCK_TTL_SECONDS / 4 )); do
+                acquire_lock >/dev/null 2>&1 || echo "WARNING: could not renew lease ${LOCK_NAME}" >&2
+              done ) &
+            RENEW_PID=$!
+          }
           release_lock() {
-            local token url
+            local token url current rv
+            if [[ -n "${RENEW_PID:-}" ]]; then
+              kill "${RENEW_PID}" 2>/dev/null || true
+              wait "${RENEW_PID}" 2>/dev/null || true
+              RENEW_PID=""
+            fi
             token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
             url="$(k8s_api_base)/apis/coordination.k8s.io/v1/namespaces/${LOCK_NAMESPACE}/leases/${LOCK_NAME}"
-            k8s_curl -o /dev/null -H "Authorization: Bearer ${token}" -H "Content-Type: application/strategic-merge-patch+json" -X PATCH "${url}" -d "{\"spec\":{\"holderIdentity\":\"\"}}" || true
+            k8s_curl --fail -o /tmp/lease-release.json -H "Authorization: Bearer ${token}" "${url}" 2>/dev/null || return 0
+            current=$(grep -oE '"holderIdentity"[[:space:]]*:[[:space:]]*"[^"]*"' /tmp/lease-release.json | head -1 | cut -d'"' -f4 || true)
+            if [[ "${current}" != "${NODE_NAME}" ]]; then
+              echo "Lease ${LOCK_NAME} is held by ${current:-nobody}; leaving it"
+              return 0
+            fi
+            rv=$(grep -oE '"resourceVersion"[[:space:]]*:[[:space:]]*"[^"]*"' /tmp/lease-release.json | head -1 | cut -d'"' -f4 || true)
+            k8s_curl -o /dev/null -H "Authorization: Bearer ${token}" -H "Content-Type: application/strategic-merge-patch+json" -X PATCH "${url}" -d "{\"metadata\":{\"resourceVersion\":\"${rv}\"},\"spec\":{\"holderIdentity\":\"\"}}" || true
           }
 
           install_if_missing() {
@@ -311,11 +350,6 @@ spec:
           done
           echo "Refresh target: ${CAND_VERSION} revision ${CAND_REV} from ${LXD_CHANNEL}"
 
-          while any_node_failed; do
-            echo "LXD refresh paused; another node has upgrade-status=failed-*"
-            sleep 30
-          done
-
           if ! host snap changes >/dev/null 2>&1; then
             echo "ERROR: snapd not responsive — refresh would be treated as host shutdown and stop every VM"
             exit 1
@@ -327,33 +361,54 @@ spec:
           JMARK="lxd-initializer-jcheck-${NODE_NAME}-$(date -u +%s)"
           host systemd-cat -t lxd-initializer echo "${JMARK}" || true
           sleep 3
-          if ! host journalctl --no-pager --since "-2 min" 2>/dev/null | grep -qF "${JMARK}"; then
+          # grep without -q reads the whole stream; -q exits early and pipefail then
+          # reports the journalctl SIGPIPE as a missing marker.
+          if ! host journalctl --no-pager --since "-2 min" 2>/dev/null | grep -F "${JMARK}" >/dev/null; then
             echo "ERROR: journal capture not working; refusing to refresh blind"; exit 1
           fi
 
-          echo "Waiting for cluster lease ${LOCK_NAME}"
-          LOCK_WAITED=0
-          until acquire_lock; do
-            sleep 15
-            LOCK_WAITED=$((LOCK_WAITED + 15))
-            if (( LOCK_WAITED > 3600 )); then
-              echo "ERROR: could not acquire lease within 3600s"
-              exit 1
-            fi
-          done
-          trap release_lock EXIT
+          # The queue, the repave label and VM states can all change while this pod waits
+          # for the lease, so check them again while holding it. If one blocks the refresh,
+          # give the lease back and wait here: exiting 0 would finish the init container
+          # and leave the host below the floor.
+          while true; do
+            while any_node_failed; do
+              echo "LXD refresh paused; another node has upgrade-status=failed-*"
+              sleep 30
+            done
+            echo "Waiting for cluster lease ${LOCK_NAME}"
+            LOCK_WAITED=0
+            until acquire_lock; do
+              sleep 15
+              LOCK_WAITED=$((LOCK_WAITED + 15))
+              if (( LOCK_WAITED > 3600 )); then
+                echo "ERROR: could not acquire lease within 3600s"
+                exit 1
+              fi
+            done
+            start_lease_renewal
+            trap release_lock EXIT
 
-          if any_node_failed; then
-            echo "A node failed verification while we waited for the lease; not refreshing"
-            exit 0
-          fi
+            WAIT_REASON=""
+            if any_node_failed; then
+              WAIT_REASON="another node has upgrade-status=failed-*"
+            elif [[ "$(node_label lxdhost.cluster.com/defer-refresh || true)" == "true" ]]; then
+              WAIT_REASON="host is being repaved"
+            elif vm_in_transition; then
+              WAIT_REASON="a VM is starting, stopping, or pending"
+            fi
+            if [[ -z "${WAIT_REASON}" ]]; then
+              break
+            fi
+            echo "Not refreshing under the lease: ${WAIT_REASON}; releasing it and waiting"
+            release_lock
+            trap - EXIT
+            sleep 30
+          done
+
           CUR="$(server_version)"
           if [[ -n "${CUR}" ]] && version_ge "${CUR}" "${LXD_MIN_VERSION}"; then
             label_version "${CUR}"
-            exit 0
-          fi
-          if vm_in_transition; then
-            echo "A VM entered a transitional state under the lease; not refreshing"
             exit 0
           fi
           TARGET_VERSION="${CAND_VERSION}"
@@ -369,35 +424,35 @@ spec:
           host snap refresh --unhold lxd || true
           if ! host snap refresh lxd --revision="${TARGET_REV}"; then
             host snap refresh --hold lxd || true
-            mark_status "failed-refresh" "snap refresh to revision ${TARGET_REV} failed on ${NODE_NAME}"
+            mark_failed "failed-refresh" "snap refresh to revision ${TARGET_REV} failed on ${NODE_NAME}"
             exit 1
           fi
           # --revision leaves tracking alone; keep the host on the tested track.
           host snap switch --channel="${LXD_CHANNEL}" lxd || true
           host snap refresh --hold lxd || true
           if ! host /snap/bin/lxd waitready --timeout 300; then
-            mark_status "failed-not-ready" "LXD did not become ready after refresh"
+            mark_failed "failed-not-ready" "LXD did not become ready after refresh"
             exit 1
           fi
           NEW="$(server_version)"
           NEW_REV="$(installed_revision || true)"
           if [[ "${NEW}" != "${TARGET_VERSION}" || "${NEW_REV}" != "${TARGET_REV}" ]]; then
-            mark_status "failed-version" "expected ${TARGET_VERSION} rev ${TARGET_REV}, got ${NEW:-unknown} rev ${NEW_REV:-unknown}"
+            mark_failed "failed-version" "expected ${TARGET_VERSION} rev ${TARGET_REV}, got ${NEW:-unknown} rev ${NEW_REV:-unknown}"
             exit 1
           fi
           STOP_REASON="$(host journalctl -u snap.lxd.daemon --since "${REFRESH_SINCE}" --no-pager 2>/dev/null | grep -F 'Stop reason' | tail -1 || true)"
           echo "Daemon stop line: ${STOP_REASON:-<none>}"
           if echo "${STOP_REASON}" | grep -qi 'host shutdown'; then
-            mark_status "failed-host-shutdown" "refresh stopped instances on ${NODE_NAME}"
+            mark_failed "failed-host-shutdown" "refresh stopped instances on ${NODE_NAME}"
             exit 1
           fi
           if [[ -z "${STOP_REASON}" ]] || ! echo "${STOP_REASON}" | grep -qi 'snap refresh'; then
-            mark_status "failed-stop-reason" "unexpected stop reason: ${STOP_REASON:-absent}"
+            mark_failed "failed-stop-reason" "unexpected stop reason: ${STOP_REASON:-absent}"
             exit 1
           fi
           host bash -lc "ps -eo pid,comm | grep '[q]emu' | awk '{print \$1}' | sort" > /tmp/qemu-pids.post || true
           if [[ -s /tmp/qemu-pids.pre ]] && ! diff -q /tmp/qemu-pids.pre /tmp/qemu-pids.post >/dev/null; then
-            mark_status "failed-vm-restarted" "qemu PID set changed during refresh"
+            mark_failed "failed-vm-restarted" "qemu PID set changed during refresh"
             exit 1
           fi
           label_version "${NEW}"

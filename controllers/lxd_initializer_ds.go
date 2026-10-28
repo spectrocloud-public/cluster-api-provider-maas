@@ -13,8 +13,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	capiutil "sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/yaml"
@@ -654,11 +654,13 @@ func (r *MaasClusterReconciler) syncLXDDeferRefresh(ctx context.Context, namespa
 	}
 	for i := range machines.Items {
 		mm := &machines.Items[i]
-		if mm.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(mm, maintenance.HostEvacuationFinalizer) {
+		// A repave starts when the owning Machine is deleted. The evacuation finalizer
+		// is no signal: it is added to every HCP host up front.
+		machine, err := capiutil.GetOwnerMachine(ctx, r.Client, mm.ObjectMeta)
+		if err != nil || machine == nil {
 			continue
 		}
-		machine := &clusterv1.Machine{}
-		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: mm.Name}, machine); err != nil {
+		if mm.DeletionTimestamp.IsZero() && machine.DeletionTimestamp.IsZero() {
 			continue
 		}
 		if machine.Status.NodeRef.Name != "" {

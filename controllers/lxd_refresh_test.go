@@ -1,13 +1,22 @@
 package controllers
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8sscheme "k8s.io/client-go/kubernetes/scheme"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
+	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/maintenance"
 )
 
 var defaultLXDPolicy = lxdVersionPolicy{AutoRefresh: true, Floor: lxdMinServerVersion, Approved: lxdTestedVersions}
@@ -203,6 +212,120 @@ func TestLXDRefreshNodeReporting(t *testing.T) {
 			names, detail := lxdRefreshBlockedNodes(tt.nodes)
 			g.Expect(names).To(Equal(tt.wantBlocked))
 			g.Expect(detail).To(Equal(tt.wantDetail))
+		})
+	}
+}
+
+func TestSyncLXDDeferRefresh(t *testing.T) {
+	const ns, clusterName = "hcp", "hcp-1"
+	deleting := metav1.NewTime(time.Now())
+
+	machine := func(name, node string, deleted bool) *clusterv1.Machine {
+		m := &clusterv1.Machine{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+		m.Status.NodeRef.Name = node
+		if deleted {
+			m.DeletionTimestamp = &deleting
+			m.Finalizers = []string{"test/hold"}
+		}
+		return m
+	}
+	maasMachine := func(name, owner string, deleted bool, finalizers ...string) *infrav1beta1.MaasMachine {
+		mm := &infrav1beta1.MaasMachine{ObjectMeta: metav1.ObjectMeta{
+			Name:       name,
+			Namespace:  ns,
+			Labels:     map[string]string{clusterv1.ClusterNameLabel: clusterName},
+			Finalizers: finalizers,
+		}}
+		if owner != "" {
+			mm.OwnerReferences = []metav1.OwnerReference{{APIVersion: clusterv1.GroupVersion.String(), Kind: "Machine", Name: owner, UID: "uid"}}
+		}
+		if deleted {
+			mm.DeletionTimestamp = &deleting
+			if len(mm.Finalizers) == 0 {
+				mm.Finalizers = []string{"test/hold"}
+			}
+		}
+		return mm
+	}
+	node := func(name string, deferred bool) *corev1.Node {
+		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{}}}
+		if deferred {
+			n.Labels[lxdDeferRefreshLabel] = "true"
+		}
+		return n
+	}
+
+	tests := []struct {
+		name      string
+		mgmt      []client.Object
+		nodes     []client.Object
+		wantDefer map[string]bool
+	}{
+		{
+			name: "defers the node of a Machine being deleted under a differently named MaasMachine",
+			mgmt: []client.Object{
+				machine("hcp-1-cp-abc12", "node-a", true),
+				maasMachine("hcp-1-cp-xyz89", "hcp-1-cp-abc12", false, HostEvacuationFinalizer),
+			},
+			nodes:     []client.Object{node("node-a", false)},
+			wantDefer: map[string]bool{"node-a": true},
+		},
+		{
+			name: "does not defer a healthy host that carries the evacuation finalizer",
+			mgmt: []client.Object{
+				machine("hcp-1-cp-abc12", "node-a", false),
+				maasMachine("hcp-1-cp-xyz89", "hcp-1-cp-abc12", false, HostEvacuationFinalizer, maintenance.HostEvacuationFinalizer),
+			},
+			nodes:     []client.Object{node("node-a", false)},
+			wantDefer: map[string]bool{"node-a": false},
+		},
+		{
+			name: "defers the node when the MaasMachine itself is being deleted",
+			mgmt: []client.Object{
+				machine("hcp-1-cp-abc12", "node-a", false),
+				maasMachine("hcp-1-cp-xyz89", "hcp-1-cp-abc12", true),
+			},
+			nodes:     []client.Object{node("node-a", false)},
+			wantDefer: map[string]bool{"node-a": true},
+		},
+		{
+			name: "clears a stale label once the host is no longer being repaved",
+			mgmt: []client.Object{
+				machine("hcp-1-cp-abc12", "node-a", false),
+				maasMachine("hcp-1-cp-xyz89", "hcp-1-cp-abc12", false),
+			},
+			nodes:     []client.Object{node("node-a", true)},
+			wantDefer: map[string]bool{"node-a": false},
+		},
+		{
+			name: "ignores a MaasMachine without an owning Machine",
+			mgmt: []client.Object{
+				maasMachine("hcp-1-cp-xyz89", "", true),
+			},
+			nodes:     []client.Object{node("node-a", false)},
+			wantDefer: map[string]bool{"node-a": false},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = k8sscheme.AddToScheme(scheme)
+	_ = clusterv1.AddToScheme(scheme)
+	_ = infrav1beta1.AddToScheme(scheme)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			mgmt := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.mgmt...).Build()
+			remote := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.nodes...).Build()
+			r := &MaasClusterReconciler{Client: mgmt, Log: logr.Discard()}
+
+			g.Expect(r.syncLXDDeferRefresh(context.Background(), ns, clusterName, remote)).To(Succeed())
+
+			for name, want := range tt.wantDefer {
+				n := &corev1.Node{}
+				g.Expect(remote.Get(context.Background(), client.ObjectKey{Name: name}, n)).To(Succeed())
+				g.Expect(n.Labels[lxdDeferRefreshLabel] == "true").To(Equal(want), "node %s", name)
+			}
 		})
 	}
 }
