@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -335,6 +336,15 @@ func addressInPreferredSubnets(log logr.Logger, preferredSubnets []string, addre
 	return false
 }
 
+const (
+	// lxdRefreshActiveRequeue tracks a refresh that is moving host by host.
+	lxdRefreshActiveRequeue = time.Minute
+	// lxdRefreshWaitingRequeue applies while a refresh waits on a person (a failed
+	// host to investigate, or a version to approve). An approval edits the
+	// MaasCluster, which reconciles immediately anyway.
+	lxdRefreshWaitingRequeue = 10 * time.Minute
+)
+
 func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope *scope.ClusterScope) (ctrl.Result, error) {
 	clusterScope.Info("Reconciling MaasCluster")
 
@@ -430,6 +440,28 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 			conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError, "%s", err.Error())
 			return reconcile.Result{}, err
 		}
+		targetNodes := &corev1.NodeList{}
+		if err := remoteClient.List(context.Background(), targetNodes); err == nil {
+			if failed := lxdRefreshFailedNodeNames(targetNodes.Items); len(failed) > 0 {
+				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError,
+					"LXD refresh failed on %s. Clear lxdhost.cluster.com/upgrade-status on that node after investigation.", strings.Join(failed, ", "))
+				clusterScope.Info("LXD refresh failed; Palette reconcile is not blocked", "nodes", failed)
+				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+			}
+			// With autoRefresh off the DaemonSet is gone and nothing clears a blocked
+			// label, so a stale one must not hold LXDReady at False.
+			policy := lxdPolicyFor(maasCluster)
+			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items); policy.AutoRefresh && len(blocked) > 0 {
+				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDRefreshBlockedReason, clusterv1.ConditionSeverityWarning,
+					"LXD refresh on %s is waiting for an approved version (%s). Add it to cloud.maas.lxd.approvedVersions after validating it with MAAS.",
+					strings.Join(blocked, ", "), detail)
+				clusterScope.Info("LXD refresh waiting for an approved version; Palette reconcile is not blocked", "nodes", blocked, "detail", detail)
+				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+			}
+			if policy.AutoRefresh && !lxdRefreshSettled(targetNodes.Items, policy) {
+				return ctrl.Result{RequeueAfter: lxdRefreshActiveRequeue}, nil
+			}
+		}
 		conditions.MarkTrue(maasCluster, infrav1beta1.LXDReadyCondition)
 		clusterScope.Info("LXD hosts are available")
 	}
@@ -449,7 +481,8 @@ func (r *MaasClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.GenericEventChannel = make(chan event.GenericEvent)
 	}
 
-	c, err := ctrl.NewControllerManagedBy(mgr).
+	clusterToMaasCluster := util.ClusterToInfrastructureMapFunc(context.Background(), infrav1beta1.GroupVersion.WithKind("MaasCluster"), mgr.GetClient(), &infrav1beta1.MaasCluster{})
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.MaasCluster{}).
 		WithOptions(controller.Options{
 			RecoverPanic: &recover,
@@ -460,11 +493,16 @@ func (r *MaasClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Watches(
 			&clusterv1.Cluster{},
-			handler.EnqueueRequestsFromMapFunc(
-				util.ClusterToInfrastructureMapFunc(context.Background(), infrav1beta1.GroupVersion.WithKind("MaasCluster"), mgr.GetClient(), &infrav1beta1.MaasCluster{}),
-			),
+			handler.EnqueueRequestsFromMapFunc(clusterToMaasCluster),
 			//predicates.ClusterUnpaused(mgr.GetScheme(), r.Log),
-		).
+		)
+	// An already initialized cluster gets no other event when the cluster cache
+	// connects (e.g. after a controller restart), and reconcileNormal stops before
+	// the LXD step while the workload API is unreachable.
+	if r.Tracker != nil {
+		b = b.WatchesRawSource(r.Tracker.GetClusterSource("maascluster", clusterToMaasCluster))
+	}
+	c, err := b.
 		WithEventFilter(predicates.ResourceNotPaused(mgr.GetScheme(), r.Log)).
 		Build(r)
 	if err != nil {
