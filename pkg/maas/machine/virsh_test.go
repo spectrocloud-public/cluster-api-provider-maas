@@ -403,3 +403,57 @@ func TestBareMetalAllocationExcludesVMsWhenVirshIsEnabled(t *testing.T) {
 	_, err := s.DeployMachine("userdata")
 	g.Expect(err).To(MatchError(ContainSubstring("no machine available")))
 }
+
+// Deleting a composed VM in MAAS removes it and its disks from the hypervisor. Releasing it
+// instead leaves the VM holding host capacity after the Machine is gone.
+func TestVirshTeardownDeletesTheVM(t *testing.T) {
+	notFound := errors.New("ServerError: 404 Not Found (No Machine matches the given query.)")
+
+	for _, tc := range []struct {
+		name      string
+		hostname  string
+		getErr    error
+		deleteErr error
+		wantErr   bool
+		wantDel   bool
+	}{
+		{name: "deletes this machine's VM", hostname: "vm-worker-0-abcde", wantDel: true},
+		{name: "hostname matches case-insensitively", hostname: "VM-Worker-0-abcde", wantDel: true},
+		{name: "already gone", getErr: notFound},
+		{name: "deleted concurrently", hostname: "vm-worker-0-abcde", deleteErr: notFound, wantDel: true},
+		{name: "delete failure keeps the finalizer", hostname: "vm-worker-0-abcde", deleteErr: errors.New("500"), wantErr: true, wantDel: true},
+		{name: "refuses a machine that is not this VM", hostname: "someone-else", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			ctrl := gomock.NewController(t)
+
+			clientSet := mockclientset.NewMockClientSetInterface(ctrl)
+			machines := mockclientset.NewMockMachines(ctrl)
+			vm := mockclientset.NewMockMachine(ctrl)
+			clientSet.EXPECT().Machines().Return(machines).AnyTimes()
+			machines.EXPECT().Machine("vm1").Return(vm).AnyTimes()
+			if tc.getErr != nil {
+				vm.EXPECT().Get(gomock.Any()).Return(nil, tc.getErr)
+			} else {
+				vm.EXPECT().Get(gomock.Any()).Return(vm, nil)
+				vm.EXPECT().Hostname().Return(tc.hostname).AnyTimes()
+			}
+			if tc.wantDel {
+				vm.EXPECT().Delete(gomock.Any()).Return(tc.deleteErr)
+			}
+
+			s := newVirshService(t, clientSet, func(mm *infrav1beta1.MaasMachine) {
+				mm.Annotations = map[string]string{vmNameAnnotation: "vm-worker-0-abcde"}
+				mm.Spec.ProviderID = ptr.To("maas:///zone-a/vm1")
+			})
+
+			err := s.ReleaseMachine("vm1")
+			if tc.wantErr {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+		})
+	}
+}

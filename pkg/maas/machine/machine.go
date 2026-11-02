@@ -121,9 +121,7 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 
 	m, err := s.maasClient.Machines().Machine(systemID).Get(context.Background())
 	if err != nil {
-		// Treat MAAS 404 as not found (already deleted)
-		msg := err.Error()
-		if strings.Contains(msg, "status: 404") || strings.Contains(strings.ToLower(msg), "no machine matches") {
+		if isNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -134,8 +132,18 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 	return machine, nil
 }
 
+// isNotFound reports a MAAS 404 for a machine that no longer exists.
+func isNotFound(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "status: 404") || strings.Contains(strings.ToLower(msg), "no machine matches")
+}
+
 func (s *Service) ReleaseMachine(systemID string) error {
 	ctx := context.TODO()
+
+	if s.scope.MaasMachine != nil && s.scope.IsVirshVMRequested() {
+		return s.deleteVirshVM(ctx, systemID)
+	}
 
 	releaser := s.maasClient.Machines().Machine(systemID).Releaser()
 	// MAAS ignores quick_erase and secure_erase unless erase=true is also set.

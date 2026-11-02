@@ -257,3 +257,28 @@ func (s *Service) createVirshVM(ctx context.Context, userDataB64 string) (*infra
 	_ = s.scope.PatchObject()
 	return nil, ErrVMComposing
 }
+
+// deleteVirshVM deletes a composed VM from MAAS, which removes it and its disks from the
+// hypervisor. It is not released first: release fails for a VM that never left Ready, and an
+// erase is wasted on disks about to be destroyed.
+func (s *Service) deleteVirshVM(ctx context.Context, systemID string) error {
+	vm := s.maasClient.Machines().Machine(systemID)
+	m, err := vm.Get(ctx)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return errors.Wrapf(err, "virsh: failed to get VM %s for deletion", systemID)
+	}
+
+	want := s.scope.MaasMachine.Annotations[vmNameAnnotation]
+	if want == "" || !strings.EqualFold(m.Hostname(), want) {
+		return errors.Errorf("virsh: refusing to delete machine %s: hostname %q is not this machine's VM %q", systemID, m.Hostname(), want)
+	}
+
+	s.scope.Info("Deleting virsh VM", "system-id", systemID, "hostname", want)
+	if err := vm.Delete(ctx); err != nil && !isNotFound(err) {
+		return errors.Wrapf(err, "virsh: failed to delete VM %s", systemID)
+	}
+	return nil
+}
