@@ -314,3 +314,21 @@ func TestVirshDeployRejectsFailedCommissioning(t *testing.T) {
 	g.Expect(errors.Is(err, ErrVMComposing)).To(BeFalse())
 	g.Expect(vm.deployer).To(BeNil())
 }
+
+func TestVirshDeployForwardsDeployInMemory(t *testing.T) {
+	for _, inMemory := range []bool{true, false} {
+		g := NewWithT(t)
+
+		vm := &fakeMachine{systemID: "vm1", state: "Ready", zone: &fakeZone{name: "zone-a"}}
+		s := newVirshService(t, newFakeClientSet(vm), func(mm *infrav1beta1.MaasMachine) {
+			mm.Spec.ProviderID = ptr.To("maas:///zone-a/vm1")
+			mm.Spec.DeployInMemory = inMemory
+		})
+
+		m, err := s.DeployMachine("userdata")
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(m.ID).To(Equal("vm1"))
+		g.Expect(vm.deployer.deployed).To(BeTrue())
+		g.Expect(vm.deployer.ephemeral).To(Equal(inMemory), "deployInMemory=%v", inMemory)
+	}
+}

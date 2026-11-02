@@ -224,6 +224,7 @@ func (s *Service) createVirshVM(ctx context.Context, userDataB64 string) (*infra
 		deploying, err := m.Deployer().
 			SetUserData(userDataB64).
 			SetOSSystem(osystem).
+			SetEphemeralDeploy(mm.Spec.DeployInMemory).
 			SetDistroSeries(distroSeries).Deploy(ctx)
 		if err != nil {
 			return nil, errors.Wrap(err, "virsh: failed to deploy composed VM")
