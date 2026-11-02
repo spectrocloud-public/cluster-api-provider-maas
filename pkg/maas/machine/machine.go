@@ -214,6 +214,12 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 			// Allow both bare metal and LXD VM hosts for LXD-enabled clusters
 		}
 
+		// Composed virsh VMs sit in Ready until deployed; without this the allocator can take
+		// one and the backstop below force-releases it.
+		if s.scope.ClusterScope.IsVirshEnabled() {
+			allocator.WithNotPod(true)
+		}
+
 		if len(mm.Spec.Tags) > 0 {
 			allocator.WithTags(mm.Spec.Tags)
 		}

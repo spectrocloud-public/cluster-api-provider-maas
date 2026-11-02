@@ -6,6 +6,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
 	"github.com/spectrocloud/maas-client-go/maasclient"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
+	mockclientset "github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/client/mock"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/scope"
 )
 
@@ -378,4 +380,26 @@ func TestVirshComposeOnHostInTheDefaultResourcePool(t *testing.T) {
 	_, err := s.DeployMachine("userdata")
 	g.Expect(err).To(MatchError(ErrVMComposing))
 	g.Expect(host.composer.calls).To(Equal(1))
+}
+
+// With virsh enabled, MAAS holds composed VMs in Ready while they wait to be deployed. The
+// bare-metal allocator must not take one: the backstop would then force-release it.
+func TestBareMetalAllocationExcludesVMsWhenVirshIsEnabled(t *testing.T) {
+	g := NewWithT(t)
+	ctrl := gomock.NewController(t)
+
+	clientSet := mockclientset.NewMockClientSetInterface(ctrl)
+	machines := mockclientset.NewMockMachines(ctrl)
+	allocator := mockclientset.NewMockMachineAllocator(ctrl)
+	clientSet.EXPECT().Machines().Return(machines)
+	machines.EXPECT().Allocator().Return(allocator)
+	allocator.EXPECT().WithCPUCount(2).Return(allocator)
+	allocator.EXPECT().WithMemory(4096).Return(allocator)
+	allocator.EXPECT().WithNotPod(true).Return(allocator)
+	allocator.EXPECT().Allocate(gomock.Any()).Return(nil, errors.New("no machine available"))
+
+	s := newVirshService(t, clientSet, func(mm *infrav1beta1.MaasMachine) { mm.Spec.Virsh = nil })
+
+	_, err := s.DeployMachine("userdata")
+	g.Expect(err).To(MatchError(ContainSubstring("no machine available")))
 }
