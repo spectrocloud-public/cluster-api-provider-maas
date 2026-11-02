@@ -360,3 +360,22 @@ func TestVirshComposeSkipsHostWithoutTheStoragePool(t *testing.T) {
 	g.Expect(withPool.composer.calls).To(Equal(1))
 	g.Expect(withPool.composer.params.Values().Get("storage")).To(Equal("root:60(fast)"))
 }
+
+func TestVirshComposeOnHostInTheDefaultResourcePool(t *testing.T) {
+	g := NewWithT(t)
+
+	// The client reports no ResourcePool for MAAS's default pool (ID 0).
+	host := &fakeVMHost{
+		name: "kvm1", zone: &fakeZone{id: 1, name: "zone-a"}, pool: nil, cores: 64, memory: 262144,
+		composer: &fakeComposer{result: &fakeMachine{systemID: "vm1"}},
+	}
+	c := newFakeClientSet()
+	c.vmHosts.hosts = []maasclient.VMHost{host}
+	c.pools.pools = []maasclient.ResourcePool{&fakePool{id: 0, name: "default"}, &fakePool{id: 1, name: "pool-a"}}
+	s := newVirshService(t, c, nil)
+	s.scope.ClusterScope.MaasCluster.Spec.Virsh.ResourcePool = "default"
+
+	_, err := s.DeployMachine("userdata")
+	g.Expect(err).To(MatchError(ErrVMComposing))
+	g.Expect(host.composer.calls).To(Equal(1))
+}

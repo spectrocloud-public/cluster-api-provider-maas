@@ -290,3 +290,22 @@ func TestSelectHostKeepsHostsWithoutStorageData(t *testing.T) {
 		t.Fatalf("SelectHost() error = %v", err)
 	}
 }
+
+// The client returns no ResourcePool for pool ID 0, MAAS's default pool, so hosts in it must
+// still match that pool by name.
+func TestSelectHostMatchesTheDefaultResourcePool(t *testing.T) {
+	hosts := []maasclient.VMHost{
+		virshHost("kvm1", "zone-a", "", 32, 131072),
+		virshHost("kvm2", "zone-a", "pool-a", 64, 262144),
+	}
+	got, err := SelectHost(hosts, SelectOptions{ResourcePool: "default", DefaultPoolName: "default"})
+	if err != nil {
+		t.Fatalf("SelectHost() error = %v", err)
+	}
+	if got.Name() != "kvm1" {
+		t.Fatalf("selected %q, want kvm1 in the default pool", got.Name())
+	}
+	if _, err := SelectHost(hosts[:1], SelectOptions{ResourcePool: "pool-a", DefaultPoolName: "default"}); err == nil {
+		t.Fatal("a host in the default pool must not match another pool")
+	}
+}

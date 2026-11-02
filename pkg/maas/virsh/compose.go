@@ -111,3 +111,17 @@ func FindByHostname(ctx context.Context, client maasclient.ClientSetInterface, h
 	}
 	return nil, nil
 }
+
+// DefaultPoolName returns the name of MAAS's default resource pool, which has ID 0.
+func DefaultPoolName(ctx context.Context, client maasclient.ClientSetInterface) (string, error) {
+	pools, err := client.ResourcePools().List(ctx, nil)
+	if err != nil {
+		return "", errors.Wrap(err, "virsh: unable to list resource pools")
+	}
+	for _, p := range pools {
+		if p.ID() == 0 {
+			return p.Name(), nil
+		}
+	}
+	return "", nil
+}

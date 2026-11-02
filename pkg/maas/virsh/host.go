@@ -22,6 +22,9 @@ type SelectOptions struct {
 	Zone string
 	// ResourcePool restricts to a MAAS resource pool. Empty = any.
 	ResourcePool string
+	// DefaultPoolName is the name of MAAS's default resource pool (ID 0). The client reports
+	// no pool for hosts in it, so this is the pool name used for them.
+	DefaultPoolName string
 	// HostTags requires ALL of these tags on the host. Empty = any. Tags rather than a host
 	// name prefix: renaming a host must not change whether it is eligible.
 	HostTags []string
@@ -129,8 +132,8 @@ func SelectHost(hosts []maasclient.VMHost, opts SelectOptions) (maasclient.VMHos
 			lastWhyNot = fmt.Sprintf("host %q is in zone %q, wanted %q", h.Name(), zoneName(h), opts.Zone)
 			continue
 		}
-		if opts.ResourcePool != "" && !strings.EqualFold(poolName(h), opts.ResourcePool) {
-			lastWhyNot = fmt.Sprintf("host %q is in pool %q, wanted %q", h.Name(), poolName(h), opts.ResourcePool)
+		if pool := poolName(h, opts.DefaultPoolName); opts.ResourcePool != "" && !strings.EqualFold(pool, opts.ResourcePool) {
+			lastWhyNot = fmt.Sprintf("host %q is in pool %q, wanted %q", h.Name(), pool, opts.ResourcePool)
 			continue
 		}
 		if !hostHasAllTags(h, opts.HostTags) {
@@ -180,11 +183,11 @@ func zoneName(h maasclient.VMHost) string {
 	return ""
 }
 
-func poolName(h maasclient.VMHost) string {
+func poolName(h maasclient.VMHost, defaultPool string) string {
 	if p := h.ResourcePool(); p != nil {
 		return p.Name()
 	}
-	return ""
+	return defaultPool
 }
 
 // Placement carries the machine-level placement inputs that override cluster defaults.

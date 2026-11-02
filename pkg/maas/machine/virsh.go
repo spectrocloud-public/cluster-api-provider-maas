@@ -123,6 +123,11 @@ func (s *Service) PrepareVirshVM(ctx context.Context) (*infrav1beta1.Machine, er
 	}
 
 	opts := s.virshSelectOptions()
+	if opts.ResourcePool != "" {
+		if opts.DefaultPoolName, err = virsh.DefaultPoolName(ctx, s.maasClient); err != nil {
+			return nil, err
+		}
+	}
 	host, err := virsh.SelectHost(hosts, opts)
 	if err != nil {
 		// A condition rather than a hard failure: usually every hypervisor is momentarily
