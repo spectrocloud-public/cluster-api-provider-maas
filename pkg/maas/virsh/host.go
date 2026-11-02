@@ -31,15 +31,15 @@ type SelectOptions struct {
 	MinMemoryMB int
 }
 
-// ErrNoEligibleHost is returned when no registered virsh host satisfies the constraints.
+// NoEligibleHostError is returned when no registered virsh host satisfies the constraints.
 // Distinguishable so callers can requeue instead of failing the Machine: the usual cause is
 // every hypervisor being momentarily full, not a bad spec.
-type ErrNoEligibleHost struct {
+type NoEligibleHostError struct {
 	Considered int
 	Reason     string
 }
 
-func (e *ErrNoEligibleHost) Error() string {
+func (e *NoEligibleHostError) Error() string {
 	return fmt.Sprintf("no eligible virsh VM host among %d considered: %s", e.Considered, e.Reason)
 }
 
@@ -85,7 +85,7 @@ func headroom(h maasclient.VMHost, cores, memoryMB int) float64 {
 func SelectHost(hosts []maasclient.VMHost, opts SelectOptions) (maasclient.VMHost, error) {
 	considered := len(hosts)
 	if considered == 0 {
-		return nil, &ErrNoEligibleHost{Considered: 0, Reason: "MAAS returned no VM hosts at all"}
+		return nil, &NoEligibleHostError{Considered: 0, Reason: "MAAS returned no VM hosts at all"}
 	}
 
 	var (
@@ -130,7 +130,7 @@ func SelectHost(hosts []maasclient.VMHost, opts SelectOptions) (maasclient.VMHos
 			// A setup problem, not a capacity problem: waiting will not fix it.
 			reason = fmt.Sprintf("no VM host of type %q is registered in MAAS (%s)", HostType, lastWhyNot)
 		}
-		return nil, &ErrNoEligibleHost{Considered: considered, Reason: reason}
+		return nil, &NoEligibleHostError{Considered: considered, Reason: reason}
 	}
 
 	sort.SliceStable(eligible, func(i, j int) bool {

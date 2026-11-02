@@ -11,7 +11,7 @@ import (
 
 // ComposeRequest describes the VM to compose on a selected virsh host.
 type ComposeRequest struct {
-	// Hostname must be stable across reconciles -- see ErrHostnameTaken.
+	// Hostname must be stable across reconciles -- see HostnameTakenError.
 	Hostname string
 	Cores    int
 	MemoryMB int
@@ -20,22 +20,22 @@ type ComposeRequest struct {
 	StoragePool string
 }
 
-// ErrHostnameTaken signals that MAAS already has a machine with the requested hostname.
+// HostnameTakenError signals that MAAS already has a machine with the requested hostname.
 //
 // Compose is not idempotent -- a retry creates a second VM -- and the controller composes
 // before it can record the system ID. Any interruption in that window produces this error with
 // a real VM already on the hypervisor, so callers must adopt it rather than retry. Treating it
 // as a generic failure leaks the VM: nothing references it, so nothing deletes it.
-type ErrHostnameTaken struct {
+type HostnameTakenError struct {
 	Hostname string
 	Cause    error
 }
 
-func (e *ErrHostnameTaken) Error() string {
+func (e *HostnameTakenError) Error() string {
 	return fmt.Sprintf("a machine named %q already exists in MAAS: %v", e.Hostname, e.Cause)
 }
 
-func (e *ErrHostnameTaken) Unwrap() error { return e.Cause }
+func (e *HostnameTakenError) Unwrap() error { return e.Cause }
 
 // isHostnameTaken recognises MAAS's duplicate-hostname rejection, which arrives as a 400 with
 // a validation message rather than a typed error. Both words must match: misreading an
@@ -86,7 +86,7 @@ func Compose(ctx context.Context, host maasclient.VMHost, req ComposeRequest) (m
 	m, err := host.Composer().Compose(ctx, params)
 	if err != nil {
 		if isHostnameTaken(err) {
-			return nil, &ErrHostnameTaken{Hostname: req.Hostname, Cause: err}
+			return nil, &HostnameTakenError{Hostname: req.Hostname, Cause: err}
 		}
 		return nil, errors.Wrapf(err, "virsh: compose on host %q failed", host.Name())
 	}

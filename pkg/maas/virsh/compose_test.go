@@ -131,12 +131,12 @@ func TestComposeSurfacesHostnameTakenAsTypedError(t *testing.T) {
 
 	_, err := Compose(context.Background(), host, ComposeRequest{Hostname: "vm-x", Cores: 2, MemoryMB: 4096})
 
-	var taken *ErrHostnameTaken
+	var taken *HostnameTakenError
 	if !errors.As(err, &taken) {
-		t.Fatalf("expected *ErrHostnameTaken so the caller can adopt the orphan, got %T: %v", err, err)
+		t.Fatalf("expected *HostnameTakenError so the caller can adopt the orphan, got %T: %v", err, err)
 	}
 	if taken.Hostname != "vm-x" {
-		t.Fatalf("ErrHostnameTaken.Hostname = %q, want %q", taken.Hostname, "vm-x")
+		t.Fatalf("HostnameTakenError.Hostname = %q, want %q", taken.Hostname, "vm-x")
 	}
 }
 
@@ -152,7 +152,7 @@ func TestComposeDoesNotMisreadUnrelatedErrors(t *testing.T) {
 		host := newComposableHost("kvm1", "zone-a", "pool-a", c)
 		_, err := Compose(context.Background(), host, ComposeRequest{Hostname: "vm-x", Cores: 2, MemoryMB: 4096})
 
-		var taken *ErrHostnameTaken
+		var taken *HostnameTakenError
 		if errors.As(err, &taken) {
 			t.Fatalf("error %q must NOT be classified as a duplicate hostname", msg)
 		}

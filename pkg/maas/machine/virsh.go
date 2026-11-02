@@ -16,7 +16,7 @@ import (
 
 // vmNameAnnotation records the composed VM's MAAS hostname, so a reconcile interrupted between
 // compose and the status write can adopt the orphan instead of composing a second VM.
-// See virsh.ErrHostnameTaken.
+// See virsh.HostnameTakenError.
 const vmNameAnnotation = "maas.spectrocloud.com/vm-name"
 
 // virshVMName returns a stable MAAS hostname for this machine's VM, persisting it on first
@@ -154,7 +154,7 @@ func (s *Service) PrepareVirshVM(ctx context.Context) (*infrav1beta1.Machine, er
 	composed, err := virsh.Compose(ctx, host, req)
 	if err != nil {
 		// A racing reconcile composed it first. Adopt: the VM is real, and failing strands it.
-		var taken *virsh.ErrHostnameTaken
+		var taken *virsh.HostnameTakenError
 		if errors.As(err, &taken) {
 			if existing, ferr := virsh.FindByHostname(ctx, s.maasClient, vmName); ferr == nil && existing != nil {
 				s.scope.Info("Compose raced; adopting the existing VM", "hostname", vmName)

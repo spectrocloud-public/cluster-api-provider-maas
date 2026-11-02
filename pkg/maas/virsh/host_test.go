@@ -106,9 +106,9 @@ func TestSelectHostNoVirshHostsIsDistinguishable(t *testing.T) {
 		&fakeHost{name: "lxd-host-1", hostType: "lxd", availCores: 64, availMem: 262144},
 	}
 	_, err := SelectHost(hosts, SelectOptions{})
-	var noHost *ErrNoEligibleHost
+	var noHost *NoEligibleHostError
 	if !errors.As(err, &noHost) {
-		t.Fatalf("expected *ErrNoEligibleHost, got %T: %v", err, err)
+		t.Fatalf("expected *NoEligibleHostError, got %T: %v", err, err)
 	}
 	// An operator setup problem must not read like a transient capacity problem.
 	if want := `no VM host of type "virsh" is registered`; !strings.Contains(noHost.Reason, want) {
