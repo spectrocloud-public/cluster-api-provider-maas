@@ -112,7 +112,7 @@ spec:
                       LXD VM hosts in
                     type: string
                 type: object
-              virsh:
+              virshConfig:
                 description: |-
                   Virsh contains the configuration for composing VMs on MAAS-registered
                   libvirt/KVM (virsh) VM hosts. Unlike the LXD path, the provider does not

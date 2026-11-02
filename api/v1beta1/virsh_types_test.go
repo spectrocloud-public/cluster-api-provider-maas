@@ -2,6 +2,7 @@ package v1beta1
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -60,7 +61,7 @@ func TestMaasClusterVirshRoundTrips(t *testing.T) {
 		},
 	}
 	if err := testEnv.Create(ctx, cluster); err != nil {
-		t.Fatalf("create with spec.virsh rejected by the apiserver: %v", err)
+		t.Fatalf("create with spec.virshConfig rejected by the apiserver: %v", err)
 	}
 	t.Cleanup(func() { _ = testEnv.Delete(ctx, cluster) })
 
@@ -69,22 +70,22 @@ func TestMaasClusterVirshRoundTrips(t *testing.T) {
 
 	v := got.Spec.Virsh
 	if v == nil {
-		t.Fatal("spec.virsh was pruned by the apiserver -- the CRD is missing the field")
+		t.Fatal("spec.virshConfig was pruned by the apiserver -- the CRD is missing the field")
 	}
 	if v.Enabled == nil || !*v.Enabled {
-		t.Errorf("spec.virsh.enabled = %v, want true", v.Enabled)
+		t.Errorf("spec.virshConfig.enabled = %v, want true", v.Enabled)
 	}
 	if v.ResourcePool != "pool-a" {
-		t.Errorf("spec.virsh.resourcePool = %q, want %q", v.ResourcePool, "pool-a")
+		t.Errorf("spec.virshConfig.resourcePool = %q, want %q", v.ResourcePool, "pool-a")
 	}
 	if v.Zone != "zone-a" {
-		t.Errorf("spec.virsh.zone = %q, want %q", v.Zone, "zone-a")
+		t.Errorf("spec.virshConfig.zone = %q, want %q", v.Zone, "zone-a")
 	}
 	if v.StoragePool != "fast" {
-		t.Errorf("spec.virsh.storagePool = %q, want %q", v.StoragePool, "fast")
+		t.Errorf("spec.virshConfig.storagePool = %q, want %q", v.StoragePool, "fast")
 	}
 	if len(v.HostTags) != 2 || v.HostTags[0] != "k8s-worker" || v.HostTags[1] != "kvm" {
-		t.Errorf("spec.virsh.hostTags = %v, want [k8s-worker kvm]", v.HostTags)
+		t.Errorf("spec.virshConfig.hostTags = %v, want [k8s-worker kvm]", v.HostTags)
 	}
 }
 
@@ -112,7 +113,7 @@ func TestMaasClusterVirshDefaultsToDisabled(t *testing.T) {
 		t.Fatal("expected enabled to be defaulted by the CRD, got nil")
 	}
 	if *got.Spec.Virsh.Enabled {
-		t.Error("spec.virsh.enabled defaulted to true; virsh composition must be opt-in")
+		t.Error("spec.virshConfig.enabled defaulted to true; virsh composition must be opt-in")
 	}
 }
 
@@ -133,7 +134,7 @@ func TestMaasClusterWithoutVirshIsUnaffected(t *testing.T) {
 	got := &MaasCluster{}
 	getCreated(t, ctx, client.ObjectKeyFromObject(cluster), got)
 	if got.Spec.Virsh != nil {
-		t.Errorf("spec.virsh should stay nil when unset, got %+v", got.Spec.Virsh)
+		t.Errorf("spec.virshConfig should stay nil when unset, got %+v", got.Spec.Virsh)
 	}
 }
 
@@ -208,5 +209,19 @@ func TestMaasMachineTemplateCarriesVirsh(t *testing.T) {
 	}
 	if v.Enabled == nil || !*v.Enabled || v.StoragePool != "fast" {
 		t.Errorf("template.spec.virsh did not round trip: %+v", v)
+	}
+}
+
+func TestMaasClusterVirshJSONName(t *testing.T) {
+	b, err := json.Marshal(MaasClusterSpec{Virsh: &VirshConfig{Enabled: ptr.To(true)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["virshConfig"]; !ok {
+		t.Errorf("MaasCluster spec serialises virsh as %s, want key virshConfig to match lxdConfig", b)
 	}
 }

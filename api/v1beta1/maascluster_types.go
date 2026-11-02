@@ -50,7 +50,7 @@ type MaasClusterSpec struct {
 	// libvirt/KVM (virsh) VM hosts. Unlike the LXD path, the provider does not
 	// register these hosts; they must already be VM hosts in MAAS.
 	// +optional
-	Virsh *VirshConfig `json:"virsh,omitempty"`
+	Virsh *VirshConfig `json:"virshConfig,omitempty"`
 }
 
 // VirshConfig configures composition of VMs on MAAS-registered virsh (libvirt/KVM) VM hosts.
