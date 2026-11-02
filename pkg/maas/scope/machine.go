@@ -95,7 +95,9 @@ func (m *MachineScope) PatchObject() error {
 		infrav1beta1.MachineDeployedCondition,
 	}
 
-	if m.IsControlPlane() {
+	// An externally managed endpoint has no MAAS DNS record to attach to, so DNSAttached is
+	// never reported and must not hold Ready at Unknown.
+	if m.IsControlPlane() && !m.hasCustomEndpoint() {
 		applicableConditions = append(applicableConditions, infrav1beta1.DNSAttachedCondition)
 	}
 	// Always update the readyCondition by summarizing the state of other conditions.
@@ -112,6 +114,11 @@ func (m *MachineScope) PatchObject() error {
 			infrav1beta1.MachineDeployedCondition,
 		}},
 	)
+}
+
+func (m *MachineScope) hasCustomEndpoint() bool {
+	return m.ClusterScope != nil && m.ClusterScope.MaasCluster != nil &&
+		infrautil.IsCustomEndpointPresent(m.ClusterScope.MaasCluster.GetAnnotations())
 }
 
 // Close closes the current scope persisting the cluster configuration and status.
