@@ -97,8 +97,26 @@ func TestComposeStoragePoolQualifiesTheDisk(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Compose() error = %v", err)
 	}
-	if got := c.gotParams.Values().Get("storage"); got != "fast:60" {
-		t.Fatalf("storage = %q, want %q", got, "fast:60")
+	// MAAS parses storage as label:size(tags); the pool is selected by naming it in the tags.
+	if got := c.gotParams.Values().Get("storage"); got != "root:60(fast)" {
+		t.Fatalf("storage = %q, want %q", got, "root:60(fast)")
+	}
+}
+
+func TestComposeRejectsStoragePoolThatBreaksTheConstraint(t *testing.T) {
+	for _, pool := range []string{"a,b", "a(b", "a)b"} {
+		c := &recordingComposer{}
+		host := newComposableHost("kvm1", "zone-a", "pool-a", c)
+
+		_, err := Compose(context.Background(), host, ComposeRequest{
+			Hostname: "vm-x", Cores: 2, MemoryMB: 4096, DiskGB: 60, StoragePool: pool,
+		})
+		if err == nil {
+			t.Errorf("storage pool %q must be rejected", pool)
+		}
+		if c.calls != 0 {
+			t.Errorf("storage pool %q reached MAAS", pool)
+		}
 	}
 }
 

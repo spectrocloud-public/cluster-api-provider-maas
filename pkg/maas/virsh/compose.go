@@ -66,11 +66,15 @@ func Compose(ctx context.Context, host maasclient.VMHost, req ComposeRequest) (m
 		Set("cores", fmt.Sprintf("%d", req.Cores)).
 		Set("memory", fmt.Sprintf("%d", req.MemoryMB))
 
-	// MAAS expects "<size in GB>" or "<pool>:<size>". Omit it entirely when no size was asked
-	// for, so that a zero does not become a request for a 0 GB disk.
+	// MAAS parses storage as "label:size(tag,...)" and picks the pool named in the tags.
+	// Omit it entirely when no size was asked for, so that a zero does not become a request
+	// for a 0 GB disk.
 	if req.DiskGB > 0 {
 		if req.StoragePool != "" {
-			params.Set("storage", fmt.Sprintf("%s:%d", req.StoragePool, req.DiskGB))
+			if strings.ContainsAny(req.StoragePool, ",()") {
+				return nil, errors.Errorf("virsh: storage pool name %q cannot be used in a MAAS storage constraint", req.StoragePool)
+			}
+			params.Set("storage", fmt.Sprintf("root:%d(%s)", req.DiskGB, req.StoragePool))
 		} else {
 			params.Set("storage", fmt.Sprintf("%d", req.DiskGB))
 		}
