@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -280,4 +281,36 @@ func TestVirshAdoptsAnOrphanedVMByHostname(t *testing.T) {
 	g.Expect(err).To(MatchError(ErrVMComposing))
 	g.Expect(host.composer.calls).To(BeZero(), "an existing VM must be adopted, not composed again")
 	g.Expect(s.scope.MaasMachine.Spec.ProviderID).To(Equal(ptr.To("maas:///zone-a/vm9")))
+}
+
+func TestVirshDeployWaitsForCommissioning(t *testing.T) {
+	for _, state := range []string{"New", "Commissioning", "Testing"} {
+		t.Run(state, func(t *testing.T) {
+			g := NewWithT(t)
+
+			vm := &fakeMachine{systemID: "vm1", hostname: "vm-worker-0-abcde", state: state, zone: &fakeZone{name: "zone-a"}}
+			s := newVirshService(t, newFakeClientSet(vm), func(mm *infrav1beta1.MaasMachine) {
+				mm.Spec.ProviderID = ptr.To("maas:///zone-a/vm1")
+				mm.Spec.SystemID = ptr.To("vm1")
+			})
+
+			_, err := s.DeployMachine("userdata")
+			g.Expect(err).To(MatchError(ErrVMComposing))
+			g.Expect(vm.deployer).To(BeNil(), "deploy must not be requested while MAAS is commissioning")
+		})
+	}
+}
+
+func TestVirshDeployRejectsFailedCommissioning(t *testing.T) {
+	g := NewWithT(t)
+
+	vm := &fakeMachine{systemID: "vm1", state: "Failed commissioning", zone: &fakeZone{name: "zone-a"}}
+	s := newVirshService(t, newFakeClientSet(vm), func(mm *infrav1beta1.MaasMachine) {
+		mm.Spec.ProviderID = ptr.To("maas:///zone-a/vm1")
+	})
+
+	_, err := s.DeployMachine("userdata")
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(errors.Is(err, ErrVMComposing)).To(BeFalse())
+	g.Expect(vm.deployer).To(BeNil())
 }

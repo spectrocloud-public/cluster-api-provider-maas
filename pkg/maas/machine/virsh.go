@@ -19,6 +19,11 @@ import (
 // See virsh.HostnameTakenError.
 const vmNameAnnotation = "maas.spectrocloud.com/vm-name"
 
+const (
+	vmStateCommissioning = infrav1beta1.MachineState("Commissioning")
+	vmStateTesting       = infrav1beta1.MachineState("Testing")
+)
+
 // virshVMName returns a stable MAAS hostname for this machine's VM, persisting it on first
 // use. It is the only handle on a VM that was composed but not yet recorded, so it is derived
 // from the Machine name and UID, both fixed for the life of the Machine.
@@ -203,6 +208,16 @@ func (s *Service) createVirshVM(ctx context.Context, userDataB64 string) (*infra
 		m, err := s.maasClient.Machines().Machine(*id).Get(ctx)
 		if err != nil {
 			return nil, errors.Wrap(err, "virsh: failed to get composed VM for deploy")
+		}
+
+		// MAAS commissions a composed VM before it can be deployed, and rejects a deploy
+		// request in the meantime.
+		switch st := infrav1beta1.MachineState(m.State()); st {
+		case infrav1beta1.MachineStateReady, infrav1beta1.MachineStateAllocated:
+		case infrav1beta1.MachineStateNew, vmStateCommissioning, vmStateTesting:
+			return nil, ErrVMComposing
+		default:
+			return nil, errors.Errorf("virsh: composed VM %s is %q, not ready to deploy", m.SystemID(), st)
 		}
 
 		osystem, distroSeries := splitImage(mm.Spec.Image)
