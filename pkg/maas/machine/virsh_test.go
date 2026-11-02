@@ -332,3 +332,31 @@ func TestVirshDeployForwardsDeployInMemory(t *testing.T) {
 		g.Expect(vm.deployer.ephemeral).To(Equal(inMemory), "deployInMemory=%v", inMemory)
 	}
 }
+
+func TestVirshComposeSkipsHostWithoutTheStoragePool(t *testing.T) {
+	g := NewWithT(t)
+
+	const gb = int64(1000 * 1000 * 1000)
+	roomy := &fakeVMHost{
+		name: "kvm1", zone: &fakeZone{id: 1, name: "zone-a"}, cores: 64, memory: 262144,
+		storage:  []maasclient.StoragePool{{Name: "default", Available: 1000 * gb}},
+		composer: &fakeComposer{result: &fakeMachine{systemID: "vm1"}},
+	}
+	withPool := &fakeVMHost{
+		name: "kvm2", zone: &fakeZone{id: 2, name: "zone-b"}, cores: 16, memory: 65536,
+		storage:  []maasclient.StoragePool{{Name: "fast", Available: 200 * gb}},
+		composer: &fakeComposer{result: &fakeMachine{systemID: "vm2"}},
+	}
+	c := newFakeClientSet()
+	c.vmHosts.hosts = []maasclient.VMHost{roomy, withPool}
+	s := newVirshService(t, c, func(mm *infrav1beta1.MaasMachine) {
+		mm.Spec.MinDiskSizeInGB = ptr.To(60)
+	})
+	s.scope.ClusterScope.MaasCluster.Spec.Virsh.StoragePool = "fast"
+
+	_, err := s.DeployMachine("userdata")
+	g.Expect(err).To(MatchError(ErrVMComposing))
+	g.Expect(roomy.composer.calls).To(BeZero())
+	g.Expect(withPool.composer.calls).To(Equal(1))
+	g.Expect(withPool.composer.params.Values().Get("storage")).To(Equal("root:60(fast)"))
+}

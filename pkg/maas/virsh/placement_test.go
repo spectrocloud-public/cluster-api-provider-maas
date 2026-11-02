@@ -74,3 +74,14 @@ func TestShapeBecomesHostMinimum(t *testing.T) {
 		t.Fatalf("VM shape must become the host capacity floor, got cores=%d mem=%d", got.MinCores, got.MinMemoryMB)
 	}
 }
+
+func TestStorageResolution(t *testing.T) {
+	got := MergeSelectOptions(ClusterDefaults{StoragePool: "default"}, Placement{DiskGB: 60})
+	if got.StoragePool != "default" || got.MinDiskGB != 60 {
+		t.Fatalf("got pool %q disk %d, want the cluster pool %q and 60", got.StoragePool, got.MinDiskGB, "default")
+	}
+	got = MergeSelectOptions(ClusterDefaults{StoragePool: "default"}, Placement{StoragePool: "fast"})
+	if got.StoragePool != "fast" {
+		t.Fatalf("StoragePool = %q, want the machine override %q", got.StoragePool, "fast")
+	}
+}

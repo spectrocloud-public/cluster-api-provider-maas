@@ -42,6 +42,7 @@ type fakeHost struct {
 	tags       []string
 	availCores int
 	availMem   int
+	storage    []maasclient.StoragePool
 }
 
 func (h *fakeHost) SystemID() string     { return "sys-" + h.name }
@@ -69,7 +70,7 @@ func (h *fakeHost) AvailableCores() int                                { return 
 func (h *fakeHost) AvailableMemory() int                               { return h.availMem }
 func (h *fakeHost) Capabilities() []string                             { return nil }
 func (h *fakeHost) Projects() []string                                 { return nil }
-func (h *fakeHost) StoragePools() []maasclient.StoragePool             { return nil }
+func (h *fakeHost) StoragePools() []maasclient.StoragePool             { return h.storage }
 func (h *fakeHost) Tags() []string                                     { return h.tags }
 func (h *fakeHost) Composer() maasclient.VMComposer                    { return nil }
 func (h *fakeHost) Machines() maasclient.VMHostMachines                { return nil }
@@ -226,5 +227,66 @@ func TestIsVirshHost(t *testing.T) {
 		if got := IsVirshHost(&fakeHost{hostType: tc.typ}); got != tc.want {
 			t.Fatalf("IsVirshHost(%q) = %v, want %v", tc.typ, got, tc.want)
 		}
+	}
+}
+
+func withStorage(h *fakeHost, pools ...maasclient.StoragePool) *fakeHost {
+	h.storage = pools
+	return h
+}
+
+const gb = int64(1000 * 1000 * 1000)
+
+// A host the VM's disk cannot fit on must be skipped at selection; otherwise it stays the top
+// pick on every retry and compose keeps failing while another host has room.
+func TestSelectHostFiltersOnStorage(t *testing.T) {
+	hosts := []maasclient.VMHost{
+		withStorage(virshHost("kvm1", "zone-a", "p", 64, 262144),
+			maasclient.StoragePool{Name: "default", Available: 500 * gb},
+			maasclient.StoragePool{Name: "fast", Available: 10 * gb}),
+		withStorage(virshHost("kvm2", "zone-a", "p", 32, 131072),
+			maasclient.StoragePool{Name: "default", Available: 20 * gb},
+			maasclient.StoragePool{Name: "fast", Available: 200 * gb}),
+		withStorage(virshHost("kvm3", "zone-a", "p", 128, 524288),
+			maasclient.StoragePool{Name: "default", Available: 30 * gb}),
+	}
+
+	for _, tc := range []struct {
+		name string
+		opts SelectOptions
+		want string
+	}{
+		{"named pool with room", SelectOptions{StoragePool: "fast", MinDiskGB: 100}, "kvm2"},
+		{"named pool must exist on the host", SelectOptions{StoragePool: "fast", MinCores: 4, MinMemoryMB: 8192}, "kvm1"},
+		{"no pool named: any pool with room", SelectOptions{MinDiskGB: 100, MinCores: 4, MinMemoryMB: 8192}, "kvm1"},
+		{"no disk requested: roomiest host", SelectOptions{MinCores: 4, MinMemoryMB: 8192}, "kvm3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SelectHost(hosts, tc.opts)
+			if err != nil {
+				t.Fatalf("SelectHost() error = %v", err)
+			}
+			if got.Name() != tc.want {
+				t.Fatalf("selected %q, want %q", got.Name(), tc.want)
+			}
+		})
+	}
+
+	_, err := SelectHost(hosts, SelectOptions{StoragePool: "fast", MinDiskGB: 1000})
+	var noHost *NoEligibleHostError
+	if !errors.As(err, &noHost) {
+		t.Fatalf("expected *NoEligibleHostError when no pool has room, got %v", err)
+	}
+	if _, err := SelectHost(hosts, SelectOptions{StoragePool: "missing"}); err == nil {
+		t.Fatal("a storage pool no host has must not match")
+	}
+}
+
+// Hosts that report no storage pools are not filtered on disk size: there is nothing to
+// compare against, and MAAS still validates the compose request.
+func TestSelectHostKeepsHostsWithoutStorageData(t *testing.T) {
+	hosts := []maasclient.VMHost{virshHost("kvm1", "zone-a", "p", 64, 262144)}
+	if _, err := SelectHost(hosts, SelectOptions{MinDiskGB: 100}); err != nil {
+		t.Fatalf("SelectHost() error = %v", err)
 	}
 }

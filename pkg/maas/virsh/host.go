@@ -29,6 +29,10 @@ type SelectOptions struct {
 	MinCores int
 	// MinMemoryMB is the minimum memory in MB that must still be AVAILABLE on the host.
 	MinMemoryMB int
+	// StoragePool requires a libvirt storage pool of this name on the host. Empty = any.
+	StoragePool string
+	// MinDiskGB is the VM disk size; a pool with this much space AVAILABLE is required.
+	MinDiskGB int
 }
 
 // NoEligibleHostError is returned when no registered virsh host satisfies the constraints.
@@ -62,6 +66,26 @@ func hostHasAllTags(h maasclient.VMHost, required []string) bool {
 		}
 	}
 	return true
+}
+
+// hostHasStorage reports whether a VM disk fits on the host: on the named pool when one is
+// given, otherwise on any pool. A host that reports no pools is only rejected when a specific
+// pool is required. MAAS sizes compose disks in GB of 1000^3 bytes.
+func hostHasStorage(h maasclient.VMHost, pool string, diskGB int) bool {
+	need := int64(diskGB) * 1000 * 1000 * 1000
+	pools := h.StoragePools()
+	if pool == "" && (diskGB <= 0 || len(pools) == 0) {
+		return true
+	}
+	for _, p := range pools {
+		if pool != "" && p.Name != pool {
+			continue
+		}
+		if p.Available >= need {
+			return true
+		}
+	}
+	return false
 }
 
 // headroom scores a host by the fraction of capacity left after placing the VM, taking the
@@ -121,6 +145,10 @@ func SelectHost(hosts []maasclient.VMHost, opts SelectOptions) (maasclient.VMHos
 			lastWhyNot = fmt.Sprintf("host %q has %d MB available, need %d", h.Name(), h.AvailableMemory(), opts.MinMemoryMB)
 			continue
 		}
+		if !hostHasStorage(h, opts.StoragePool, opts.MinDiskGB) {
+			lastWhyNot = fmt.Sprintf("host %q has no storage pool %q with %d GB available", h.Name(), opts.StoragePool, opts.MinDiskGB)
+			continue
+		}
 		eligible = append(eligible, h)
 	}
 
@@ -167,9 +195,13 @@ type Placement struct {
 	ResourcePool string
 	// HostTags are layered on top of the cluster-level tags, never replacing them.
 	HostTags []string
-	// Cores and MemoryMB are the VM's shape, and double as the host's minimum free capacity.
+	// Cores, MemoryMB and DiskGB are the VM's shape, and double as the host's minimum free
+	// capacity.
 	Cores    int
 	MemoryMB int
+	DiskGB   int
+	// StoragePool overrides the cluster storage pool, if set.
+	StoragePool string
 }
 
 // ClusterDefaults carries the cluster-level virsh placement defaults.
@@ -190,14 +222,19 @@ func MergeSelectOptions(defaults ClusterDefaults, p Placement) SelectOptions {
 	opts := SelectOptions{
 		Zone:         defaults.Zone,
 		ResourcePool: defaults.ResourcePool,
+		StoragePool:  defaults.StoragePool,
 		MinCores:     p.Cores,
 		MinMemoryMB:  p.MemoryMB,
+		MinDiskGB:    p.DiskGB,
 	}
 	if p.FailureDomain != "" {
 		opts.Zone = p.FailureDomain
 	}
 	if p.ResourcePool != "" {
 		opts.ResourcePool = p.ResourcePool
+	}
+	if p.StoragePool != "" {
+		opts.StoragePool = p.StoragePool
 	}
 	opts.HostTags = append(append([]string{}, defaults.HostTags...), p.HostTags...)
 	return opts

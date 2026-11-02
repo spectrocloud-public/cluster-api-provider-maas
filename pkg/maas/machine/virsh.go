@@ -64,7 +64,7 @@ func (s *Service) virshSelectOptions() virsh.SelectOptions {
 		defaults.StoragePool = cfg.StoragePool
 	}
 
-	p := virsh.Placement{HostTags: s.scope.VirshHostTags()}
+	p := virsh.Placement{HostTags: s.scope.VirshHostTags(), StoragePool: s.scope.VirshStoragePool()}
 
 	if mm.Spec.FailureDomain != nil && *mm.Spec.FailureDomain != "" {
 		p.FailureDomain = *mm.Spec.FailureDomain
@@ -79,6 +79,9 @@ func (s *Service) virshSelectOptions() virsh.SelectOptions {
 	}
 	if mm.Spec.MinMemoryInMB != nil {
 		p.MemoryMB = *mm.Spec.MinMemoryInMB
+	}
+	if mm.Spec.MinDiskSizeInGB != nil {
+		p.DiskGB = *mm.Spec.MinDiskSizeInGB
 	}
 
 	return virsh.MergeSelectOptions(defaults, p)
@@ -133,23 +136,12 @@ func (s *Service) PrepareVirshVM(ctx context.Context) (*infrav1beta1.Machine, er
 		return nil, err
 	}
 
-	diskGB := 0
-	if mm.Spec.MinDiskSizeInGB != nil {
-		diskGB = *mm.Spec.MinDiskSizeInGB
-	}
-	storagePool := s.scope.VirshStoragePool()
-	if storagePool == "" {
-		if cfg := s.scope.ClusterScope.GetVirshConfig(); cfg != nil {
-			storagePool = cfg.StoragePool
-		}
-	}
-
 	req := virsh.ComposeRequest{
 		Hostname:    vmName,
 		Cores:       opts.MinCores,
 		MemoryMB:    opts.MinMemoryMB,
-		DiskGB:      diskGB,
-		StoragePool: storagePool,
+		DiskGB:      opts.MinDiskGB,
+		StoragePool: opts.StoragePool,
 	}
 
 	s.scope.Info("Composing virsh VM",
