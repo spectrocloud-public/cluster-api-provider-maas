@@ -106,7 +106,7 @@ func (s *Service) PrepareVirshVM(ctx context.Context) (*infrav1beta1.Machine, er
 		return nil, err
 	} else if existing != nil {
 		s.scope.Info("Adopting a previously composed virsh VM", "hostname", vmName, "system-id", existing.SystemID())
-		return s.recordComposedVM(existing)
+		return s.recordComposedVM(existing, "")
 	}
 
 	hosts, err := s.maasClient.VMHosts().List(ctx, nil)
@@ -158,19 +158,28 @@ func (s *Service) PrepareVirshVM(ctx context.Context) (*infrav1beta1.Machine, er
 		if errors.As(err, &taken) {
 			if existing, ferr := virsh.FindByHostname(ctx, s.maasClient, vmName); ferr == nil && existing != nil {
 				s.scope.Info("Compose raced; adopting the existing VM", "hostname", vmName)
-				return s.recordComposedVM(existing)
+				return s.recordComposedVM(existing, zoneName(host))
 			}
 		}
 		return nil, err
 	}
 
-	return s.recordComposedVM(composed)
+	return s.recordComposedVM(composed, zoneName(host))
 }
 
-// recordComposedVM persists the composed VM's identity onto the MaasMachine.
-func (s *Service) recordComposedVM(m maasclient.Machine) (*infrav1beta1.Machine, error) {
-	zone := ""
-	if z := m.Zone(); z != nil {
+func zoneName(h maasclient.VMHost) string {
+	if z := h.Zone(); z != nil && !hasNilValue(z) {
+		return z.Name()
+	}
+	return ""
+}
+
+// recordComposedVM persists the composed VM's identity onto the MaasMachine. fallbackZone is
+// used when m carries no zone: Compose returns a handle without fetched details, whose Zone()
+// is a typed nil.
+func (s *Service) recordComposedVM(m maasclient.Machine, fallbackZone string) (*infrav1beta1.Machine, error) {
+	zone := fallbackZone
+	if z := m.Zone(); z != nil && !hasNilValue(z) {
 		zone = z.Name()
 	}
 	s.scope.SetSystemID(m.SystemID())
@@ -206,8 +215,8 @@ func (s *Service) createVirshVM(ctx context.Context, userDataB64 string) (*infra
 		}
 
 		zone := ""
-		if deploying.Zone() != nil {
-			zone = deploying.Zone().Name()
+		if z := deploying.Zone(); z != nil && !hasNilValue(z) {
+			zone = z.Name()
 		}
 		s.scope.SetSystemID(deploying.SystemID())
 		s.scope.SetProviderID(deploying.SystemID(), zone)
