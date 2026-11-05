@@ -97,15 +97,20 @@ func Compose(ctx context.Context, host maasclient.VMHost, req ComposeRequest) (m
 	return m, nil
 }
 
-// FindByHostname locates a machine by hostname, for adopting a VM that an earlier compose
-// created but never recorded. Returns nil, nil when there is no such machine.
+// IsVirshVM reports whether m is a VM on a virsh VM host.
+func IsVirshVM(m maasclient.Machine) bool {
+	return strings.EqualFold(m.PowerType(), "virsh")
+}
+
+// FindByHostname locates a virsh VM by hostname, for adopting a VM that an earlier compose
+// created but never recorded. Returns nil, nil when there is no such VM.
 func FindByHostname(ctx context.Context, client maasclient.ClientSetInterface, hostname string) (maasclient.Machine, error) {
 	machines, err := client.Machines().List(ctx, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "virsh: unable to list machines to adopt by hostname")
 	}
 	for _, m := range machines {
-		if strings.EqualFold(m.Hostname(), hostname) {
+		if IsVirshVM(m) && strings.EqualFold(m.Hostname(), hostname) {
 			return m, nil
 		}
 	}

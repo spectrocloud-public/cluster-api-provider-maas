@@ -273,7 +273,7 @@ func TestVirshComposeRecordsVMWhoseZoneIsNotFetched(t *testing.T) {
 func TestVirshAdoptsAnOrphanedVMByHostname(t *testing.T) {
 	g := NewWithT(t)
 
-	orphan := &fakeMachine{systemID: "vm9", hostname: "vm-worker-0-abcde", state: "Commissioning", zone: &fakeZone{id: 3, name: "zone-a"}}
+	orphan := &fakeMachine{systemID: "vm9", powerType: "virsh", hostname: "vm-worker-0-abcde", state: "Commissioning", zone: &fakeZone{id: 3, name: "zone-a"}}
 	host := &fakeVMHost{name: "kvm1", cores: 32, memory: 65536, composer: &fakeComposer{}}
 	c := newFakeClientSet(orphan)
 	c.vmHosts.hosts = []maasclient.VMHost{host}
@@ -290,7 +290,7 @@ func TestVirshDeployWaitsForCommissioning(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			g := NewWithT(t)
 
-			vm := &fakeMachine{systemID: "vm1", hostname: "vm-worker-0-abcde", state: state, zone: &fakeZone{name: "zone-a"}}
+			vm := &fakeMachine{systemID: "vm1", powerType: "virsh", hostname: "vm-worker-0-abcde", state: state, zone: &fakeZone{name: "zone-a"}}
 			s := newVirshService(t, newFakeClientSet(vm), func(mm *infrav1beta1.MaasMachine) {
 				mm.Spec.ProviderID = ptr.To("maas:///zone-a/vm1")
 				mm.Spec.SystemID = ptr.To("vm1")
@@ -306,7 +306,7 @@ func TestVirshDeployWaitsForCommissioning(t *testing.T) {
 func TestVirshDeployRejectsFailedCommissioning(t *testing.T) {
 	g := NewWithT(t)
 
-	vm := &fakeMachine{systemID: "vm1", state: "Failed commissioning", zone: &fakeZone{name: "zone-a"}}
+	vm := &fakeMachine{systemID: "vm1", powerType: "virsh", state: "Failed commissioning", zone: &fakeZone{name: "zone-a"}}
 	s := newVirshService(t, newFakeClientSet(vm), func(mm *infrav1beta1.MaasMachine) {
 		mm.Spec.ProviderID = ptr.To("maas:///zone-a/vm1")
 	})
@@ -321,7 +321,7 @@ func TestVirshDeployForwardsDeployInMemory(t *testing.T) {
 	for _, inMemory := range []bool{true, false} {
 		g := NewWithT(t)
 
-		vm := &fakeMachine{systemID: "vm1", state: "Ready", zone: &fakeZone{name: "zone-a"}}
+		vm := &fakeMachine{systemID: "vm1", powerType: "virsh", state: "Ready", zone: &fakeZone{name: "zone-a"}}
 		s := newVirshService(t, newFakeClientSet(vm), func(mm *infrav1beta1.MaasMachine) {
 			mm.Spec.ProviderID = ptr.To("maas:///zone-a/vm1")
 			mm.Spec.DeployInMemory = inMemory
@@ -438,6 +438,7 @@ func TestVirshTeardownDeletesTheVM(t *testing.T) {
 			} else {
 				vm.EXPECT().Get(gomock.Any()).Return(vm, nil)
 				vm.EXPECT().Hostname().Return(tc.hostname).AnyTimes()
+				vm.EXPECT().PowerType().Return("virsh").AnyTimes()
 			}
 			if tc.wantDel {
 				vm.EXPECT().Delete(gomock.Any()).Return(tc.deleteErr)
@@ -456,4 +457,81 @@ func TestVirshTeardownDeletesTheVM(t *testing.T) {
 			}
 		})
 	}
+}
+
+// spec.systemID, spec.providerID and the vm-name annotation are all user-writable, so none of
+// them proves the machine is a VM this provider composed.
+func TestVirshRefusesMachinesThatAreNotVirshVMs(t *testing.T) {
+	bareMetal := func() *fakeMachine {
+		return &fakeMachine{systemID: "bm1", hostname: "vm-worker-0-abcde", state: "Ready", powerType: "ipmi", zone: &fakeZone{id: 3, name: "zone-a"}}
+	}
+
+	t.Run("deploy by provider ID", func(t *testing.T) {
+		g := NewWithT(t)
+		bm := bareMetal()
+		s := newVirshService(t, newFakeClientSet(bm), func(mm *infrav1beta1.MaasMachine) {
+			mm.Spec.ProviderID = ptr.To("maas:///zone-a/bm1")
+		})
+
+		_, err := s.DeployMachine("userdata")
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(bm.deployer).To(BeNil())
+	})
+
+	t.Run("prepare by system ID", func(t *testing.T) {
+		g := NewWithT(t)
+		s := newVirshService(t, newFakeClientSet(bareMetal()), func(mm *infrav1beta1.MaasMachine) {
+			mm.Spec.SystemID = ptr.To("bm1")
+		})
+
+		_, err := s.DeployMachine("userdata")
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(errors.Is(err, ErrVMComposing)).To(BeFalse())
+	})
+
+	t.Run("prepare by provider ID", func(t *testing.T) {
+		g := NewWithT(t)
+		s := newVirshService(t, newFakeClientSet(bareMetal()), func(mm *infrav1beta1.MaasMachine) {
+			mm.Spec.ProviderID = ptr.To("maas:///zone-a/bm1")
+		})
+
+		_, err := s.PrepareVirshVM(context.Background())
+		g.Expect(err).To(HaveOccurred())
+	})
+
+	t.Run("adopt by hostname", func(t *testing.T) {
+		g := NewWithT(t)
+		host := &fakeVMHost{name: "kvm1", cores: 32, memory: 65536, composer: &fakeComposer{result: &fakeMachine{systemID: "vm1", powerType: "virsh"}}}
+		c := newFakeClientSet(bareMetal())
+		c.vmHosts.hosts = []maasclient.VMHost{host}
+		s := newVirshService(t, c, nil)
+
+		_, _ = s.DeployMachine("userdata")
+		g.Expect(s.scope.MaasMachine.Spec.SystemID).ToNot(Equal(ptr.To("bm1")))
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		g := NewWithT(t)
+		bm := bareMetal()
+		s := newVirshService(t, newFakeClientSet(bm), func(mm *infrav1beta1.MaasMachine) {
+			mm.Annotations = map[string]string{vmNameAnnotation: "vm-worker-0-abcde"}
+			mm.Spec.ProviderID = ptr.To("maas:///zone-a/bm1")
+		})
+
+		g.Expect(s.ReleaseMachine("bm1")).To(HaveOccurred())
+		g.Expect(bm.deleted).To(BeFalse())
+	})
+}
+
+// A missing vm-name annotation must not hold the finalizer forever.
+func TestVirshTeardownWithoutAnnotationUsesTheGeneratedName(t *testing.T) {
+	g := NewWithT(t)
+
+	vm := &fakeMachine{systemID: "vm1", powerType: "virsh", hostname: "vm-worker-0-abcde"}
+	s := newVirshService(t, newFakeClientSet(vm), func(mm *infrav1beta1.MaasMachine) {
+		mm.Spec.ProviderID = ptr.To("maas:///zone-a/vm1")
+	})
+
+	g.Expect(s.ReleaseMachine("vm1")).To(Succeed())
+	g.Expect(vm.deleted).To(BeTrue())
 }

@@ -33,20 +33,31 @@ func (s *Service) virshVMName() string {
 		return n
 	}
 
-	uid := string(s.scope.Machine.UID)
-	short := uid
-	if len(uid) > 5 {
-		short = uid[:5]
-	}
-	name := fmt.Sprintf("vm-%s-%s", s.scope.Machine.Name, short)
-	// Lowercase so adopt-by-hostname cannot miss on case alone.
-	name = strings.ToLower(name)
-
+	name := s.generatedVirshVMName()
 	if mm.Annotations == nil {
 		mm.Annotations = map[string]string{}
 	}
 	mm.Annotations[vmNameAnnotation] = name
 	return name
+}
+
+func (s *Service) generatedVirshVMName() string {
+	uid := string(s.scope.Machine.UID)
+	short := uid
+	if len(uid) > 5 {
+		short = uid[:5]
+	}
+	// Lowercase so adopt-by-hostname cannot miss on case alone.
+	return strings.ToLower(fmt.Sprintf("vm-%s-%s", s.scope.Machine.Name, short))
+}
+
+// requireVirshVM guards every action taken on a machine named by spec.systemID,
+// spec.providerID or the vm-name annotation: all three are user-writable.
+func requireVirshVM(m maasclient.Machine, action string) error {
+	if !virsh.IsVirshVM(m) {
+		return errors.Errorf("virsh: refusing to %s machine %s: power type %q is not virsh", action, m.SystemID(), m.PowerType())
+	}
+	return nil
 }
 
 // virshSelectOptions builds host constraints from the cluster and machine specs.
@@ -97,12 +108,18 @@ func (s *Service) PrepareVirshVM(ctx context.Context) (*infrav1beta1.Machine, er
 		if err != nil {
 			return nil, errors.Wrap(err, "virsh: failed to get composed VM by system-id")
 		}
+		if err := requireVirshVM(m, "use"); err != nil {
+			return nil, err
+		}
 		return fromSDKTypeToMachine(m), nil
 	}
 	if id := s.scope.GetInstanceID(); id != nil && *id != "" {
 		m, err := s.maasClient.Machines().Machine(*id).Get(ctx)
 		if err != nil {
 			return nil, errors.Wrap(err, "virsh: failed to get composed VM by provider id")
+		}
+		if err := requireVirshVM(m, "use"); err != nil {
+			return nil, err
 		}
 		return fromSDKTypeToMachine(m), nil
 	}
@@ -206,6 +223,9 @@ func (s *Service) createVirshVM(ctx context.Context, userDataB64 string) (*infra
 		if err != nil {
 			return nil, errors.Wrap(err, "virsh: failed to get composed VM for deploy")
 		}
+		if err := requireVirshVM(m, "deploy"); err != nil {
+			return nil, err
+		}
 
 		// MAAS commissions a composed VM before it can be deployed, and rejects a deploy
 		// request in the meantime.
@@ -271,8 +291,14 @@ func (s *Service) deleteVirshVM(ctx context.Context, systemID string) error {
 		return errors.Wrapf(err, "virsh: failed to get VM %s for deletion", systemID)
 	}
 
+	if err := requireVirshVM(m, "delete"); err != nil {
+		return err
+	}
 	want := s.scope.MaasMachine.Annotations[vmNameAnnotation]
-	if want == "" || !strings.EqualFold(m.Hostname(), want) {
+	if want == "" {
+		want = s.generatedVirshVMName()
+	}
+	if !strings.EqualFold(m.Hostname(), want) {
 		return errors.Errorf("virsh: refusing to delete machine %s: hostname %q is not this machine's VM %q", systemID, m.Hostname(), want)
 	}
 
