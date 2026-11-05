@@ -269,12 +269,12 @@ type lxdHostSelectorClient interface {
 // Semantics align with MAAS allocator params for BM: each field is optional;
 // when set, it is enforced strictly; when zero/empty, that dimension is unconstrained.
 type SelectOptions struct {
-	Zone         string   // FailureDomain / AZ; empty = any
-	ResourcePool string   // MAAS resource pool; empty = any
-	Tags         []string // All required on VM host (host.Tags()); nil/empty = any
-	MinCores     int      // Minimum available cores on host; 0 = no minimum
-	MinMemory    int      // Minimum available memory (MB) on host; 0 = no minimum
-	MinDiskSizeGB int     // Minimum uncommitted disk space (GB) on host; 0 = no minimum
+	Zone          string   // FailureDomain / AZ; empty = any
+	ResourcePool  string   // MAAS resource pool; empty = any
+	Tags          []string // All required on VM host (host.Tags()); nil/empty = any
+	MinCores      int      // Minimum available cores on host; 0 = no minimum
+	MinMemory     int      // Minimum available memory (MB) on host; 0 = no minimum
+	MinDiskSizeGB int      // Minimum uncommitted disk space (GB) on host; 0 = no minimum
 
 	// ClusterID When set (non-empty), the selector counts how many control-plane VMs for this
 	// cluster already exist on each eligible host. Hosts with fewer existing CP VMs

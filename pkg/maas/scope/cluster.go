@@ -127,6 +127,10 @@ func (s *ClusterScope) Close() error {
 
 // APIServerPort returns the APIServerPort to use when creating the load balancer.
 func (s *ClusterScope) APIServerPort() int {
+	if infrautil.IsCustomEndpointPresent(s.MaasCluster.GetAnnotations()) && s.MaasCluster.Spec.ControlPlaneEndpoint.Port != 0 {
+		return s.MaasCluster.Spec.ControlPlaneEndpoint.Port
+	}
+
 	if s.Cluster.Spec.ClusterNetwork.APIServerPort != 0 {
 		return int(s.Cluster.Spec.ClusterNetwork.APIServerPort)
 	}
@@ -141,6 +145,11 @@ func (s *ClusterScope) SetDNSName(dnsName string) {
 // GetDNSName sets the Network systemID in spec.
 // This can't do a lookup on Status.Network.DNSDomain name since it's derviced from here
 func (s *ClusterScope) GetDNSName() string {
+	if infrautil.IsCustomEndpointPresent(s.MaasCluster.GetAnnotations()) {
+		s.SetDNSName(s.MaasCluster.Spec.ControlPlaneEndpoint.Host)
+		return s.MaasCluster.Spec.ControlPlaneEndpoint.Host
+	}
+
 	if !s.Cluster.Spec.ControlPlaneEndpoint.IsZero() {
 		return s.Cluster.Spec.ControlPlaneEndpoint.Host
 	}
@@ -154,6 +163,18 @@ func (s *ClusterScope) GetDNSName() string {
 
 	s.SetDNSName(dnsName)
 	return dnsName
+}
+
+// IsCustomEndpoint reports whether the control-plane endpoint is managed outside MAAS.
+// It calls GetDNSName for its side effect: reconcileNormal waits for Status.Network.DNSName,
+// and with a custom endpoint ReconcileDNS, which normally sets it, returns early.
+func (s *ClusterScope) IsCustomEndpoint() bool {
+	if infrautil.IsCustomEndpointPresent(s.MaasCluster.GetAnnotations()) {
+		dnsName := s.GetDNSName()
+		s.V(2).Info("Custom endpoint provided, skipping MAAS DNS reconcile", "dns", dnsName)
+		return true
+	}
+	return false
 }
 
 // GetActiveMaasMachines all MaaS machines NOT being deleted
@@ -352,6 +373,24 @@ func (s *ClusterScope) IsLXDHostEnabled() bool {
 	}
 
 	return false
+}
+
+// IsVirshEnabled reports whether this cluster composes VMs on MAAS-registered
+// libvirt/KVM (virsh) hosts.
+func (s *ClusterScope) IsVirshEnabled() bool {
+	if s == nil || s.MaasCluster == nil {
+		return false
+	}
+	v := s.MaasCluster.Spec.Virsh
+	return v != nil && v.Enabled != nil && *v.Enabled
+}
+
+// GetVirshConfig returns the cluster's virsh configuration, or nil when unset.
+func (s *ClusterScope) GetVirshConfig() *infrav1beta1.VirshConfig {
+	if s == nil || s.MaasCluster == nil {
+		return nil
+	}
+	return s.MaasCluster.Spec.Virsh
 }
 
 // GetLXDConfig returns the LXD configuration

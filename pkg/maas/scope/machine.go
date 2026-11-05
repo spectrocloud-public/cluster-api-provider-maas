@@ -95,7 +95,9 @@ func (m *MachineScope) PatchObject() error {
 		infrav1beta1.MachineDeployedCondition,
 	}
 
-	if m.IsControlPlane() {
+	// An externally managed endpoint has no MAAS DNS record to attach to, so DNSAttached is
+	// never reported and must not hold Ready at Unknown.
+	if m.IsControlPlane() && !m.hasCustomEndpoint() {
 		applicableConditions = append(applicableConditions, infrav1beta1.DNSAttachedCondition)
 	}
 	// Always update the readyCondition by summarizing the state of other conditions.
@@ -112,6 +114,11 @@ func (m *MachineScope) PatchObject() error {
 			infrav1beta1.MachineDeployedCondition,
 		}},
 	)
+}
+
+func (m *MachineScope) hasCustomEndpoint() bool {
+	return m.ClusterScope != nil && m.ClusterScope.MaasCluster != nil &&
+		infrautil.IsCustomEndpointPresent(m.ClusterScope.MaasCluster.GetAnnotations())
 }
 
 // Close closes the current scope persisting the cluster configuration and status.
@@ -340,6 +347,30 @@ func (m *MachineScope) SetNodeProviderID() error {
 	node.Spec.ProviderID = providerID
 
 	return patchHelper.Patch(ctx, node)
+}
+
+// IsVirshVMRequested reports whether this machine is composed as a virsh VM rather than
+// allocated from bare metal.
+func (m *MachineScope) IsVirshVMRequested() bool {
+	v := m.MaasMachine.Spec.Virsh
+	return v != nil && v.Enabled != nil && *v.Enabled
+}
+
+// VirshStoragePool returns the machine-level libvirt storage pool override, or "" when unset.
+func (m *MachineScope) VirshStoragePool() string {
+	if v := m.MaasMachine.Spec.Virsh; v != nil {
+		return v.StoragePool
+	}
+	return ""
+}
+
+// VirshHostTags returns machine-level host tag requirements, layered on top of the
+// cluster-level ones.
+func (m *MachineScope) VirshHostTags() []string {
+	if v := m.MaasMachine.Spec.Virsh; v != nil {
+		return v.HostTags
+	}
+	return nil
 }
 
 // GetDynamicLXD returns whether this machine should be created as an LXD VM (driven by higher-level policy).

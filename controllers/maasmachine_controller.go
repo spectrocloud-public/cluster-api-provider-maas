@@ -54,6 +54,7 @@ import (
 	maasmachine "github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/machine"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/maintenance"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/scope"
+	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/virsh"
 )
 
 var ErrRequeueDNS = errors.New("need to requeue DNS")
@@ -451,6 +452,10 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 				// VM just composed and is commissioning; requeue shortly
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
+			if isWaitingForVirshHost(err) {
+				machineScope.Info("No eligible virsh VM host yet; requeueing", "reason", err.Error())
+				return ctrl.Result{RequeueAfter: time.Minute}, nil
+			}
 			machineScope.Error(err, "unable to create m")
 			conditions.Set(machineScope.MaasMachine, metav1.Condition{Type: infrav1beta1.MachineDeployedCondition, Status: metav1.ConditionFalse, Reason: infrav1beta1.MachineDeployFailedReason, Message: err.Error()})
 			return ctrl.Result{}, err
@@ -579,6 +584,13 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 // execute a power-on at all, and whenever it can reach the BMC it reports "on" or "off" - never
 // "error". A genuinely down node therefore reports a confirmed off as soon as its BMC is reachable,
 // and is recovered on that reconcile.
+// isWaitingForVirshHost reports a deploy that is waiting for virsh host capacity rather than
+// failing. The MachineDeployed condition already carries the reason.
+func isWaitingForVirshHost(err error) bool {
+	var noHost *virsh.NoEligibleHostError
+	return errors.As(err, &noHost)
+}
+
 func isConfirmedPoweredOff(powerState string) bool {
 	return powerState == infrav1beta1.MachinePowerStateOff
 }
@@ -612,6 +624,10 @@ func (r *MaasMachineReconciler) resolveUserData(machineScope *scope.MachineScope
 
 func (r *MaasMachineReconciler) reconcileDNSAttachment(machineScope *scope.MachineScope, clusterScope *scope.ClusterScope, m *infrav1beta1.Machine) error {
 	if !machineScope.IsControlPlane() {
+		return nil
+	}
+
+	if clusterScope.IsCustomEndpoint() {
 		return nil
 	}
 

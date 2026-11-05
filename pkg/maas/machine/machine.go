@@ -53,6 +53,28 @@ func splitImage(image string) (osystem, distroSeries string) {
 	return customOSSystem, image
 }
 
+// EraseMode selects how MAAS wipes a machine's disks when it is released.
+type EraseMode string
+
+const (
+	EraseNone   EraseMode = "none"
+	EraseQuick  EraseMode = "quick"
+	EraseSecure EraseMode = "secure"
+	EraseFull   EraseMode = "full"
+)
+
+// ReleaseErase is set from the manager's --release-erase flag.
+var ReleaseErase = EraseNone
+
+// ParseEraseMode validates a --release-erase value.
+func ParseEraseMode(v string) (EraseMode, error) {
+	switch m := EraseMode(v); m {
+	case EraseNone, EraseQuick, EraseSecure, EraseFull:
+		return m, nil
+	}
+	return "", errors.Errorf("invalid erase mode %q: want none, quick, secure or full", v)
+}
+
 type Service struct {
 	scope      *scope.MachineScope
 	maasClient maasclient.ClientSetInterface
@@ -99,9 +121,7 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 
 	m, err := s.maasClient.Machines().Machine(systemID).Get(context.Background())
 	if err != nil {
-		// Treat MAAS 404 as not found (already deleted)
-		msg := err.Error()
-		if strings.Contains(msg, "status: 404") || strings.Contains(strings.ToLower(msg), "no machine matches") {
+		if isNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -112,13 +132,31 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 	return machine, nil
 }
 
+// isNotFound reports a MAAS 404 for a machine that no longer exists.
+func isNotFound(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "status: 404") || strings.Contains(strings.ToLower(msg), "no machine matches")
+}
+
 func (s *Service) ReleaseMachine(systemID string) error {
 	ctx := context.TODO()
 
-	_, err := s.maasClient.Machines().
-		Machine(systemID).
-		Releaser().
-		Release(ctx)
+	if s.scope.MaasMachine != nil && s.scope.IsVirshVMRequested() {
+		return s.deleteVirshVM(ctx, systemID)
+	}
+
+	releaser := s.maasClient.Machines().Machine(systemID).Releaser()
+	// MAAS ignores quick_erase and secure_erase unless erase=true is also set.
+	switch ReleaseErase {
+	case EraseQuick:
+		releaser = releaser.WithErase().WithQuickErase()
+	case EraseSecure:
+		releaser = releaser.WithErase().WithSecureErase()
+	case EraseFull:
+		releaser = releaser.WithErase()
+	}
+
+	_, err := releaser.Release(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to release machine")
 	}
@@ -131,6 +169,16 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 	log := textlogger.NewLogger(textlogger.NewConfig())
 
 	mm := s.scope.MaasMachine
+
+	// A VM has exactly one hypervisor; refuse rather than silently prefer one.
+	if s.scope.IsVirshVMRequested() && s.scope.GetDynamicLXD() {
+		return nil, errors.New("machine requests both spec.virsh and spec.lxd; a VM has exactly one hypervisor")
+	}
+
+	if s.scope.IsVirshVMRequested() {
+		s.scope.Info("Using virsh VM composition path", "machine", mm.Name)
+		return s.createVirshVM(ctx, userDataB64)
+	}
 
 	// Decide if we should create a VM via MAAS (LXD) based on user input or node-pool policy.
 	// Machine-level enablement (preferred) or node-pool policy (fallback)
@@ -174,6 +222,12 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 			// Allow both bare metal and LXD VM hosts for LXD-enabled clusters
 		}
 
+		// Composed virsh VMs sit in Ready until deployed; without this the allocator can take
+		// one and the backstop below force-releases it.
+		if s.scope.ClusterScope.IsVirshEnabled() {
+			allocator.WithNotPod(true)
+		}
+
 		if len(mm.Spec.Tags) > 0 {
 			allocator.WithTags(mm.Spec.Tags)
 		}
@@ -190,7 +244,7 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 		}
 
 		// Backstop: If MAAS still returned a VM host, reject it for HCP control-plane
-		if s.scope.ClusterScope.IsLXDHostEnabled() {
+		if s.scope.ClusterScope.IsLXDHostEnabled() || s.scope.ClusterScope.IsVirshEnabled() {
 			pt := strings.ToLower(m.PowerType())
 			if pt == "lxd" || pt == "lxdvm" || pt == "virsh" {
 				s.scope.Info("Rejecting VM host allocation for node(s) under HCP; releasing and retrying",
@@ -212,7 +266,7 @@ func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, re
 		}
 
 		// Backstop for reuse path: if previous reconcile captured a VM host, reject for HCP CP
-		if s.scope.ClusterScope.IsLXDHostEnabled() {
+		if s.scope.ClusterScope.IsLXDHostEnabled() || s.scope.ClusterScope.IsVirshEnabled() {
 			pt := strings.ToLower(m.PowerType())
 			if pt == "lxd" || pt == "lxdvm" || pt == "virsh" {
 				s.scope.Info("Releasing previously selected VM host for node(s) under HCP; will re-allocate BM",

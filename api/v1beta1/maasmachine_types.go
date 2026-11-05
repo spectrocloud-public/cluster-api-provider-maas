@@ -80,6 +80,29 @@ type MaasMachineSpec struct {
 	// when enabled. When nil or disabled, this machine is created on bare metal.
 	// +optional
 	LXD *MachineLXDConfig `json:"lxd,omitempty"`
+
+	// Virsh requests that this machine be composed as a VM on a MAAS-registered virsh
+	// (libvirt/KVM) host rather than allocated from bare metal. When nil or disabled, this
+	// machine is allocated from bare metal as usual.
+	// +optional
+	Virsh *MachineVirshConfig `json:"virsh,omitempty"`
+}
+
+// MachineVirshConfig requests virsh VM composition for a single machine.
+type MachineVirshConfig struct {
+	// Enabled specifies whether this machine is composed as a virsh VM.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// StoragePool overrides the cluster-level libvirt storage pool for this machine's disk.
+	// +optional
+	StoragePool string `json:"storagePool,omitempty"`
+
+	// HostTags further restricts which virsh hosts may run this machine, on top of the
+	// cluster-level hostTags. All listed tags must be present on the host.
+	// +optional
+	HostTags []string `json:"hostTags,omitempty"`
 }
 
 // MachineLXDConfig defines LXD VM creation options for a machine
