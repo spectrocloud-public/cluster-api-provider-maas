@@ -81,6 +81,6 @@ require (
 
 replace (
 	github.com/prometheus/common v0.32.1 => github.com/prometheus/common v0.26.0
-	github.com/spectrocloud/maas-client-go => github.com/spectrocloud-public/maas-client-go v0.1.7-beta1
+	github.com/spectrocloud/maas-client-go => github.com/spectrocloud-public/maas-client-go v0.1.9-beta1
 	sigs.k8s.io/cluster-api => github.com/spectrocloud/cluster-api v1.13.3-beta1
 )
