@@ -50,6 +50,16 @@ func (in *LXDConfig) DeepCopyInto(out *LXDConfig) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.AutoRefresh != nil {
+		in, out := &in.AutoRefresh, &out.AutoRefresh
+		*out = new(bool)
+		**out = **in
+	}
+	if in.ApprovedVersions != nil {
+		in, out := &in.ApprovedVersions, &out.ApprovedVersions
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.SkipNetworkUpdate != nil {
 		in, out := &in.SkipNetworkUpdate, &out.SkipNetworkUpdate
 		*out = new(bool)
