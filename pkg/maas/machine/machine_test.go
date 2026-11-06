@@ -740,3 +740,6 @@ func TestVerifyVMNetworkInterfaces(t *testing.T) {
 		g.Expect(s.VerifyVMNetworkInterfaces(context.Background(), "sys-1")).To(HaveOccurred())
 	})
 }
+
+func (c *captureNetworkInterface) Tags() []string { return nil }
+func (f *fakeNetworkInterface) Tags() []string    { return nil }
