@@ -137,6 +137,8 @@ func (s *Service) ReleaseMachine(systemID string, eraseMode infrav1beta1.EraseMo
 	switch eraseMode {
 	case infrav1beta1.EraseModeQuick:
 		releaser = releaser.WithErase().WithQuickErase()
+	case infrav1beta1.EraseModeSecure:
+		releaser = releaser.WithErase().WithSecureErase()
 	case infrav1beta1.EraseModeFull:
 		releaser = releaser.WithErase()
 	case infrav1beta1.EraseModeNone, "":

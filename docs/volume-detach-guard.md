@@ -27,6 +27,8 @@ The release request itself is controlled by `spec.eraseDisksOnRelease` on the Ma
 
 - `full` (default): requests `erase=true` only. MAAS overwrites the whole device. This matches the
   official provider's bare erase request and MAAS's default secure or full behavior.
+- `secure`: requests `erase=true` and `secure_erase=true`. MAAS uses the drive's secure erase
+  feature when supported and falls back to a full wipe when it is not.
 - `quick`: requests `erase=true` and `quick_erase=true`. MAAS runs `wipefs` on the partitions and
   the disk, then writes 2 MiB of zeros at the start and end. Faster than a full wipe.
 - `none`: sends no erase request. Use it for SAN-backed clusters.
@@ -111,7 +113,7 @@ complete the detach.
 
 | Object | Field | Values | Purpose |
 |---|---|---|---|
-| MaasCluster | `spec.eraseDisksOnRelease` | `full` (default), `quick`, `none` | MAAS erase requested on release. Use `none` for SAN-backed clusters. |
+| MaasCluster | `spec.eraseDisksOnRelease` | `full` (default), `secure`, `quick`, `none` | MAAS erase requested on release. Use `none` for SAN-backed clusters. |
 
 ## Follow-up
 

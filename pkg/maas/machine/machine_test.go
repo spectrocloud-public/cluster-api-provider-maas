@@ -142,6 +142,33 @@ func TestMachine(t *testing.T) {
 		g.Expect(err).ToNot(HaveOccurred())
 	})
 
+	t.Run("release machine with secure erase", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		mockClientSetInterface := mockclientset.NewMockClientSetInterface(ctrl)
+		mockMachines := mockclientset.NewMockMachines(ctrl)
+		mockMachine := mockclientset.NewMockMachine(ctrl)
+		mockMachineReleaser := mockclientset.NewMockMachineReleaser(ctrl)
+
+		s := &Service{
+			scope: &scope.MachineScope{
+				Logger:  log,
+				Cluster: cluster,
+			},
+			maasClient: mockClientSetInterface,
+		}
+
+		mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
+		mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
+		mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
+		mockMachineReleaser.EXPECT().WithErase().Return(mockMachineReleaser)
+		mockMachineReleaser.EXPECT().WithSecureErase().Return(mockMachineReleaser)
+		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
+
+		err := s.ReleaseMachine("abc123", infrav1beta1.EraseModeSecure)
+		g.Expect(err).ToNot(HaveOccurred())
+	})
+
 	t.Run("release machine without erase", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		ctrl := gomock.NewController(t)

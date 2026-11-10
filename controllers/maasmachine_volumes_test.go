@@ -85,6 +85,13 @@ func TestEraseModeForRelease(t *testing.T) {
 			expected: infrav1beta1.EraseModeFull,
 		},
 		{
+			name: "secure",
+			clusterScope: &scope.ClusterScope{MaasCluster: &infrav1beta1.MaasCluster{
+				Spec: infrav1beta1.MaasClusterSpec{EraseDisksOnRelease: infrav1beta1.EraseModeSecure},
+			}},
+			expected: infrav1beta1.EraseModeSecure,
+		},
+		{
 			name: "none",
 			clusterScope: &scope.ClusterScope{MaasCluster: &infrav1beta1.MaasCluster{
 				Spec: infrav1beta1.MaasClusterSpec{EraseDisksOnRelease: infrav1beta1.EraseModeNone},

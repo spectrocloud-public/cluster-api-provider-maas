@@ -110,8 +110,8 @@ sudo ./lxd-test-linux --storage-backend=zfs --storage-size=50 --network-bridge=b
 
 CAPMAAS holds a MAAS release while the workload cluster still reports `VolumeAttachment` objects
 for the node, so a release cannot erase SAN LUNs that are still mapped. The erase requested on
-release is controlled by `spec.eraseDisksOnRelease` on the MaasCluster: `full` (default), `quick`,
-or `none` for SAN-backed clusters.
+release is controlled by `spec.eraseDisksOnRelease` on the MaasCluster: `full` (default), `secure`,
+`quick`, or `none` for SAN-backed clusters.
 
 See [docs/volume-detach-guard.md](docs/volume-detach-guard.md) for the conditions, annotations and
 the operator runbook for a held release.

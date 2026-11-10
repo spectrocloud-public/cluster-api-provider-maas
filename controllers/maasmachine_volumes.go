@@ -58,6 +58,8 @@ func eraseModeForRelease(clusterScope *scope.ClusterScope) infrav1beta1.EraseMod
 	switch mode := clusterScope.MaasCluster.Spec.EraseDisksOnRelease; mode {
 	case "", infrav1beta1.EraseModeFull:
 		return infrav1beta1.EraseModeFull
+	case infrav1beta1.EraseModeSecure:
+		return infrav1beta1.EraseModeSecure
 	case infrav1beta1.EraseModeQuick:
 		return infrav1beta1.EraseModeQuick
 	case infrav1beta1.EraseModeNone:
