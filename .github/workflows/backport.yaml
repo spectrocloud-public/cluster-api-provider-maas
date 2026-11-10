@@ -4,6 +4,13 @@ on:
   pull_request_target:
     types: ["labeled", "closed"]
 
+# The backport action pushes a branch and opens a pull request, removes the
+# auto-backport label and comments on conflicts. Grant only what those need.
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
 jobs:
   backport:
     name: Backport PR
@@ -17,11 +24,13 @@ jobs:
       )
     steps:
       - name: Backport Action
-        uses: sorenlouv/backport-github-action@v9.5.1
+        # v12 runs on Node 24 and renames add_original_reviewers to
+        # copy_source_pr_reviewers. v9 targets the deprecated Node 20 runtime.
+        uses: sorenlouv/backport-github-action@v12.0.4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           auto_backport_label_prefix: backport-
-          add_original_reviewers: true
+          copy_source_pr_reviewers: true
 
       - name: Info log
         if: ${{ success() }}
