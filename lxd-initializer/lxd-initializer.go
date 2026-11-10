@@ -980,13 +980,9 @@ func configureLXDNetwork(trustPassword, hostIP string) error {
 			return err
 		}
 	}
-	// Restart LXD to apply changes (avoid systemd; use snap)
-	cmd = exec.Command("nsenter", "-t", "1", "-m", "-p", "--", "snap", "restart", "lxd")
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to restart LXD via snap: %s: %w", string(output), err)
-	}
-
+	// No daemon restart: LXD applies core.https_address and core.trust_password live,
+	// and the snap treats `snap restart lxd` as a host shutdown that stops every
+	// instance on the host.
 	log.Printf("LXD configured to listen on %s", address)
 	return nil
 }
