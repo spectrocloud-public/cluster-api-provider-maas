@@ -33,14 +33,14 @@ import (
 )
 
 const (
-	// ForceReleaseAnnotation allows an operator to release a machine while the workload
-	// cluster still reports volumes attached to its node. Set it only after the volumes
-	// are detached, or unmasked at the storage array, for the affected host.
-	ForceReleaseAnnotation = "maas.cluster.x-k8s.io/force-release"
+	// SkipVolumeDetachGuardAnnotation allows an operator to release a machine while the
+	// workload cluster still reports volumes attached to its node. Set it only after the
+	// volumes are detached, or unmasked at the storage array, for the affected host.
+	SkipVolumeDetachGuardAnnotation = "infrastructure.cluster.x-k8s.io/skip-volume-detach-guard"
 
 	// EraseDisksOnClusterDeleteAnnotation opts a whole-cluster deletion into a MAAS disk
 	// erase. Individual machine deletions never request an erase, even when it is set.
-	EraseDisksOnClusterDeleteAnnotation = "maas.cluster.x-k8s.io/erase-disks-on-cluster-delete"
+	EraseDisksOnClusterDeleteAnnotation = "infrastructure.cluster.x-k8s.io/erase-disks-on-cluster-delete"
 
 	// volumeDetachRequeueInterval is how often a held release is retried.
 	volumeDetachRequeueInterval = 30 * time.Second
@@ -95,8 +95,8 @@ func countAttachedVolumes(ctx context.Context, workloadClient client.Client, nod
 
 // holdReleaseForAttachedVolumes reports whether the release must wait. It is held while the
 // workload cluster reports any volume attached to the machine's node, unless the
-// force-release annotation is set. The guard fails closed when the node is known but the
-// workload cluster cannot be queried, because a pending detach is still possible.
+// skip-volume-detach-guard annotation is set. The guard fails closed when the node is known
+// but the workload cluster cannot be queried, because a pending detach is still possible.
 func (r *MaasMachineReconciler) holdReleaseForAttachedVolumes(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope) (bool, ctrl.Result) {
 	nodeName := machineNodeName(machineScope)
 	if nodeName == "" {
@@ -111,15 +111,18 @@ func (r *MaasMachineReconciler) holdReleaseForAttachedVolumes(ctx context.Contex
 	}
 	maasMachine := machineScope.MaasMachine
 
-	if boolAnnotation(maasMachine.Annotations, ForceReleaseAnnotation) {
-		machineScope.Info("Releasing without the volume detach guard: force-release annotation set", "node", nodeName)
-		r.Recorder.Eventf(maasMachine, corev1.EventTypeWarning, "ForceRelease",
-			"Releasing while volumes may still be attached to node %q because %s is set", nodeName, ForceReleaseAnnotation)
+	if boolAnnotation(maasMachine.Annotations, SkipVolumeDetachGuardAnnotation) {
+		machineScope.Info("Releasing without the volume detach guard: skip annotation set", "node", nodeName)
+		r.Recorder.Eventf(maasMachine, corev1.EventTypeWarning, "VolumeDetachGuardSkipped",
+			"Releasing while volumes may still be attached to node %q because %s is set", nodeName, SkipVolumeDetachGuardAnnotation)
 		conditions.Delete(maasMachine, infrav1beta1.VolumeDetachPendingCondition)
 		return false, ctrl.Result{}
 	}
 
-	workloadClient, err := clusterScope.GetWorkloadClusterClient(ctx)
+	// Use the live client. A cached list can be stale while its watch lags, and it can
+	// return an empty result when the workload API is unreachable, which would permit the
+	// release instead of failing closed.
+	workloadClient, err := clusterScope.GetWorkloadClusterUncachedClient(ctx)
 	if err != nil {
 		message := fmt.Sprintf("workload cluster client unavailable, cannot confirm volumes are detached from node %q: %v", nodeName, err)
 		conditions.MarkFalse(maasMachine, infrav1beta1.VolumeDetachPendingCondition, infrav1beta1.VolumeDetachCheckFailedReason, clusterv1.ConditionSeverityWarning, "%s", message)
