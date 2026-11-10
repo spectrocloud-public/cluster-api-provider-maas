@@ -33,11 +33,11 @@ type EraseMode string
 
 const (
 	// EraseModeQuick runs MAAS quick erase: wipefs on each partition and the disk,
-	// then 2 MiB of zeros at the start and end. This is the default.
+	// then 2 MiB of zeros at the start and end. It is faster than a full wipe.
 	EraseModeQuick EraseMode = "quick"
 
-	// EraseModeFull overwrites the whole device. It takes longer and is intended for
-	// sanitization or compliance cases.
+	// EraseModeFull overwrites the whole device. This matches MAAS's behavior for a
+	// bare erase request and is the default.
 	EraseModeFull EraseMode = "full"
 
 	// EraseModeNone disables the provider erase request. Use it for SAN-backed
@@ -65,12 +65,13 @@ type MaasClusterSpec struct {
 	LXDConfig *LXDConfig `json:"lxdConfig,omitempty"`
 
 	// EraseDisksOnRelease selects the MAAS disk erase requested when a machine is
-	// released. quick runs MAAS quick erase (wipefs plus 2 MiB at both ends), full
-	// overwrites the whole device, and none disables the provider erase request.
+	// released. full matches MAAS's behavior for a bare erase request and is the
+	// default. quick runs MAAS quick erase (wipefs plus 2 MiB at both ends) and is
+	// faster. none disables the provider erase request.
 	// A MAAS region with enable_disk_erasing_on_release=true can still erase on its
 	// own; the volume detach guard is the safety mechanism for attached SAN LUNs.
 	// +kubebuilder:validation:Enum=quick;full;none
-	// +kubebuilder:default=quick
+	// +kubebuilder:default=full
 	// +optional
 	EraseDisksOnRelease EraseMode `json:"eraseDisksOnRelease,omitempty"`
 }

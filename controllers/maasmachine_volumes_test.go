@@ -66,9 +66,9 @@ func TestEraseModeForRelease(t *testing.T) {
 			expected:     infrav1beta1.EraseModeNone,
 		},
 		{
-			name:         "empty value defaults to quick",
+			name:         "empty value defaults to full",
 			clusterScope: &scope.ClusterScope{MaasCluster: &infrav1beta1.MaasCluster{}},
-			expected:     infrav1beta1.EraseModeQuick,
+			expected:     infrav1beta1.EraseModeFull,
 		},
 		{
 			name: "quick",

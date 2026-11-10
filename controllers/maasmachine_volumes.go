@@ -47,18 +47,19 @@ func boolAnnotation(annotations map[string]string, key string) bool {
 }
 
 // eraseModeForRelease returns the configured MAAS erase mode for a release. An empty
-// value is treated as quick for objects created before the field existed. A missing
-// MaasCluster, or an unrecognized value, is treated as none: the mode cannot be read
-// safely, so do not request a destructive action.
+// value is treated as full for objects created before the field existed, matching
+// MAAS's behavior for a bare erase request. A missing MaasCluster, or an unrecognized
+// value, is treated as none: the mode cannot be read safely, so do not request a
+// destructive action.
 func eraseModeForRelease(clusterScope *scope.ClusterScope) infrav1beta1.EraseMode {
 	if clusterScope == nil || clusterScope.MaasCluster == nil {
 		return infrav1beta1.EraseModeNone
 	}
 	switch mode := clusterScope.MaasCluster.Spec.EraseDisksOnRelease; mode {
-	case "", infrav1beta1.EraseModeQuick:
-		return infrav1beta1.EraseModeQuick
-	case infrav1beta1.EraseModeFull:
+	case "", infrav1beta1.EraseModeFull:
 		return infrav1beta1.EraseModeFull
+	case infrav1beta1.EraseModeQuick:
+		return infrav1beta1.EraseModeQuick
 	case infrav1beta1.EraseModeNone:
 		return infrav1beta1.EraseModeNone
 	default:

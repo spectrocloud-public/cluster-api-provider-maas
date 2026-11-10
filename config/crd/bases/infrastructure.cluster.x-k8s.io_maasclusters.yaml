@@ -61,11 +61,12 @@ spec:
                 minLength: 1
                 type: string
               eraseDisksOnRelease:
-                default: quick
+                default: full
                 description: |-
                   EraseDisksOnRelease selects the MAAS disk erase requested when a machine is
-                  released. quick runs MAAS quick erase (wipefs plus 2 MiB at both ends), full
-                  overwrites the whole device, and none disables the provider erase request.
+                  released. full matches MAAS's behavior for a bare erase request and is the
+                  default. quick runs MAAS quick erase (wipefs plus 2 MiB at both ends) and is
+                  faster. none disables the provider erase request.
                   A MAAS region with enable_disk_erasing_on_release=true can still erase on its
                   own; the volume detach guard is the safety mechanism for attached SAN LUNs.
                 enum:
