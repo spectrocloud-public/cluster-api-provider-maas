@@ -20,8 +20,10 @@ filesystem signatures are lost, and VMs on those disks fail at their next boot.
 - If the workload client cannot be reached, the release is held and the condition reason is
   `VolumeDetachCheckFailed`. The guard fails closed.
 - When no attachment remains, the condition is removed and the release continues.
-- During a whole-cluster deletion, the guard is skipped only when the release will not erase. If
-  the cluster deletion opts into an erase, the guard stays active.
+- The guard runs during whole-cluster deletion too. The provider mode is not used to skip it,
+  because a region with `enable_disk_erasing_on_release=true` can erase even when the mode is
+  `none`. If the workload API is gone during a teardown, use the skip annotation after detaching or
+  unmasking the volumes.
 
 The release request itself is controlled by `spec.eraseDisksOnRelease` on the MaasCluster:
 

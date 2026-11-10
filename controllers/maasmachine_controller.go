@@ -223,12 +223,11 @@ func (r *MaasMachineReconciler) reconcileDelete(ctx context.Context, machineScop
 		return ctrl.Result{}, err
 	}
 
-	// Decide the erase mode before the guard: a release that will erase still
-	// needs the attachment check.
+	// Decide the erase mode for the release. The guard is independent of it:
+	// a region can erase on release even when the provider mode is none.
 	eraseMode := eraseModeForRelease(clusterScope)
-	eraseRequested := eraseMode != infrav1beta1.EraseModeNone
 
-	if held, res := r.holdReleaseForAttachedVolumes(ctx, machineScope, clusterScope, eraseRequested); held {
+	if held, res := r.holdReleaseForAttachedVolumes(ctx, machineScope, clusterScope); held {
 		return res, nil
 	}
 

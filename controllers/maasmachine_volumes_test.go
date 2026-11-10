@@ -243,7 +243,6 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 		force                bool
 		workloadClient       client.Client
 		trackerErr           error
-		eraseRequested       bool
 		preexistingCondition bool
 		expectedHeld         bool
 		expectedReason       string
@@ -255,28 +254,19 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 			expectedHeld:   false,
 		},
 		{
-			name:           "not held during cluster deletion",
+			name:           "held during cluster deletion while an attachment exists",
 			cluster:        &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
 			nodeName:       "node-a",
 			workloadClient: attachedClient,
-			expectedHeld:   false,
-		},
-		{
-			name:           "held during cluster deletion when the release requests an erase",
-			cluster:        &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
-			nodeName:       "node-a",
-			workloadClient: attachedClient,
-			eraseRequested: true,
 			expectedHeld:   true,
 			expectedReason: infrav1beta1.WaitingForVolumeDetachReason,
 		},
 		{
-			name:           "not held during cluster deletion with erase and the skip annotation",
+			name:           "not held during cluster deletion when the skip annotation is set",
 			cluster:        &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
 			nodeName:       "node-a",
 			force:          true,
 			workloadClient: attachedClient,
-			eraseRequested: true,
 			expectedHeld:   false,
 		},
 		{
@@ -352,7 +342,7 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 			}
 
 			reconciler := &MaasMachineReconciler{Recorder: record.NewFakeRecorder(10)}
-			held, res := reconciler.holdReleaseForAttachedVolumes(context.Background(), machineScope, clusterScope, tt.eraseRequested)
+			held, res := reconciler.holdReleaseForAttachedVolumes(context.Background(), machineScope, clusterScope)
 			g.Expect(held).To(Equal(tt.expectedHeld))
 			if tt.expectedHeld {
 				g.Expect(res.RequeueAfter).To(Equal(volumeDetachRequeueInterval))
