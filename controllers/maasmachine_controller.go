@@ -223,7 +223,11 @@ func (r *MaasMachineReconciler) reconcileDelete(ctx context.Context, machineScop
 		return ctrl.Result{}, err
 	}
 
-	if held, res := r.holdReleaseForAttachedVolumes(ctx, machineScope, clusterScope); held {
+	// Decide the erase before the guard: a cluster deletion that requests an
+	// erase still needs the attachment check.
+	eraseDisks := shouldEraseDisksOnRelease(clusterScope)
+
+	if held, res := r.holdReleaseForAttachedVolumes(ctx, machineScope, clusterScope, eraseDisks); held {
 		return res, nil
 	}
 
@@ -231,7 +235,6 @@ func (r *MaasMachineReconciler) reconcileDelete(ctx context.Context, machineScop
 		r.bestEffortUnregisterLXDHost(clusterScope, machineScope, m)
 	}
 
-	eraseDisks := shouldEraseDisksOnRelease(clusterScope)
 	if err := r.tryReleaseWithVMHostHandling(ctx, machineScope, clusterScope, machineSvc, m, eraseDisks); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -220,14 +220,16 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 	emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	tests := []struct {
-		name           string
-		cluster        *clusterv1.Cluster
-		nodeName       string
-		force          bool
-		workloadClient client.Client
-		trackerErr     error
-		expectedHeld   bool
-		expectedReason string
+		name                 string
+		cluster              *clusterv1.Cluster
+		nodeName             string
+		force                bool
+		workloadClient       client.Client
+		trackerErr           error
+		eraseRequested       bool
+		preexistingCondition bool
+		expectedHeld         bool
+		expectedReason       string
 	}{
 		{
 			name:           "not held when the machine has no node ref",
@@ -240,6 +242,24 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 			cluster:        &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
 			nodeName:       "node-a",
 			workloadClient: attachedClient,
+			expectedHeld:   false,
+		},
+		{
+			name:           "held during cluster deletion when the release requests an erase",
+			cluster:        &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
+			nodeName:       "node-a",
+			workloadClient: attachedClient,
+			eraseRequested: true,
+			expectedHeld:   true,
+			expectedReason: infrav1beta1.WaitingForVolumeDetachReason,
+		},
+		{
+			name:           "not held during cluster deletion with erase and the skip annotation",
+			cluster:        &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
+			nodeName:       "node-a",
+			force:          true,
+			workloadClient: attachedClient,
+			eraseRequested: true,
 			expectedHeld:   false,
 		},
 		{
@@ -264,6 +284,14 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 			nodeName:       "node-a",
 			workloadClient: emptyClient,
 			expectedHeld:   false,
+		},
+		{
+			name:                 "clears a pending condition when no attachment exists",
+			cluster:              &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c"}},
+			nodeName:             "node-a",
+			workloadClient:       emptyClient,
+			preexistingCondition: true,
+			expectedHeld:         false,
 		},
 		{
 			name:           "held when the workload client is unavailable",
@@ -293,6 +321,9 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 			if tt.force {
 				maasMachine.Annotations = map[string]string{SkipVolumeDetachGuardAnnotation: "true"}
 			}
+			if tt.preexistingCondition {
+				conditions.MarkFalse(maasMachine, infrav1beta1.VolumeDetachPendingCondition, infrav1beta1.WaitingForVolumeDetachReason, clusterv1.ConditionSeverityInfo, "previous reconcile")
+			}
 			machine := &clusterv1.Machine{}
 			if tt.nodeName != "" {
 				machine.Status.NodeRef = clusterv1.MachineNodeReference{Name: tt.nodeName}
@@ -304,7 +335,7 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 			}
 
 			reconciler := &MaasMachineReconciler{Recorder: record.NewFakeRecorder(10)}
-			held, res := reconciler.holdReleaseForAttachedVolumes(context.Background(), machineScope, clusterScope)
+			held, res := reconciler.holdReleaseForAttachedVolumes(context.Background(), machineScope, clusterScope, tt.eraseRequested)
 			g.Expect(held).To(Equal(tt.expectedHeld))
 			if tt.expectedHeld {
 				g.Expect(res.RequeueAfter).To(Equal(volumeDetachRequeueInterval))

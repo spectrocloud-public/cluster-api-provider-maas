@@ -97,16 +97,26 @@ func countAttachedVolumes(ctx context.Context, workloadClient client.Client, nod
 // workload cluster reports any volume attached to the machine's node, unless the
 // skip-volume-detach-guard annotation is set. The guard fails closed when the node is known
 // but the workload cluster cannot be queried, because a pending detach is still possible.
-func (r *MaasMachineReconciler) holdReleaseForAttachedVolumes(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope) (bool, ctrl.Result) {
+//
+// A whole-cluster deletion is skipped only when the release will not erase. If the cluster
+// deletion requests an erase, holding is still required because the release can wipe every
+// disk the host sees. The skip-volume-detach-guard annotation is the escape hatch when the
+// workload API is gone during teardown.
+func (r *MaasMachineReconciler) holdReleaseForAttachedVolumes(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope, eraseRequested bool) (bool, ctrl.Result) {
 	nodeName := machineNodeName(machineScope)
 	if nodeName == "" {
 		return false, ctrl.Result{}
 	}
-	// A whole-cluster deletion is an explicit teardown. The guard is for node
-	// replacement, and holding here can deadlock the teardown once the workload API
-	// server is gone. Cluster deletion relies on the no-erase default instead.
-	if clusterScope.Cluster != nil && !clusterScope.Cluster.DeletionTimestamp.IsZero() {
-		machineScope.Info("Skipping the volume detach guard: cluster is being deleted", "node", nodeName)
+	// A whole-cluster deletion without an erase request is an explicit teardown.
+	// Skip the guard there: holding can deadlock once the workload API server is
+	// gone, and the release will not touch the disks.
+	//
+	// If the cluster deletion requests an erase, keep the guard. The release can
+	// still wipe every disk the host sees, so attachments must be gone, or the
+	// operator must set the skip-volume-detach-guard annotation.
+	clusterDeleting := clusterScope.Cluster != nil && !clusterScope.Cluster.DeletionTimestamp.IsZero()
+	if clusterDeleting && !eraseRequested {
+		machineScope.Info("Skipping the volume detach guard: cluster is being deleted without an erase request", "node", nodeName)
 		return false, ctrl.Result{}
 	}
 	maasMachine := machineScope.MaasMachine
