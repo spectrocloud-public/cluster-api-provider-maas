@@ -119,27 +119,32 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 	return machine, nil
 }
 
-func (s *Service) ReleaseMachine(systemID string, eraseDisks bool) error {
+func (s *Service) ReleaseMachine(systemID string, eraseMode infrav1beta1.EraseMode) error {
 	ctx := context.TODO()
 
 	releaser := s.maasClient.Machines().
 		Machine(systemID).
 		Releaser()
 
-	// Erase is request-only. MAAS defaults secure_erase and quick_erase to false, so a
-	// request with erase=true and no flags is a full-device overwrite. It is never
-	// requested for an individual machine deletion, only for a whole-cluster deletion
-	// where the owning MaasCluster opts in explicitly.
+	// Erase is request-only. MAAS quick erase needs erase=true and quick_erase=true.
+	// erase=true alone, with neither quick nor secure, is a full-device overwrite.
 	//
-	// This flag only controls the request. A MAAS region with
+	// This mode only controls the request. A MAAS region with
 	// enable_disk_erasing_on_release=true adds wipe-disks to every release on its own,
-	// so eraseRequested=false is not a guarantee that the server will not erase. The
+	// so an empty or none mode is not a guarantee that the server will not erase. The
 	// release guard in the controller, which waits for volume detach, is the safety
 	// mechanism for attached volumes.
-	if eraseDisks {
+	switch eraseMode {
+	case infrav1beta1.EraseModeQuick:
+		releaser = releaser.WithErase().WithQuickErase()
+	case infrav1beta1.EraseModeFull:
 		releaser = releaser.WithErase()
+	case infrav1beta1.EraseModeNone, "":
+		// No erase request.
+	default:
+		return errors.Errorf("unsupported erase mode %q", eraseMode)
 	}
-	s.scope.Info("Releasing MAAS machine", "systemID", systemID, "eraseRequested", eraseDisks)
+	s.scope.Info("Releasing MAAS machine", "systemID", systemID, "eraseMode", eraseMode)
 
 	_, err := releaser.Release(ctx)
 	if err != nil {

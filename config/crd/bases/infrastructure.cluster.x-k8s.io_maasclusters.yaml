@@ -60,6 +60,19 @@ spec:
                   on (e.g maas)
                 minLength: 1
                 type: string
+              eraseDisksOnRelease:
+                default: quick
+                description: |-
+                  EraseDisksOnRelease selects the MAAS disk erase requested when a machine is
+                  released. quick runs MAAS quick erase (wipefs plus 2 MiB at both ends), full
+                  overwrites the whole device, and none disables the provider erase request.
+                  A MAAS region with enable_disk_erasing_on_release=true can still erase on its
+                  own; the volume detach guard is the safety mechanism for attached SAN LUNs.
+                enum:
+                - quick
+                - full
+                - none
+                type: string
               failureDomains:
                 description: |-
                   FailureDomains are not usually defined on the spec.

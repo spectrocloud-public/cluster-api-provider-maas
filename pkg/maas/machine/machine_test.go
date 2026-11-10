@@ -89,7 +89,7 @@ func TestMachine(t *testing.T) {
 		}))
 	})
 
-	t.Run("release machine", func(t *testing.T) {
+	t.Run("release machine with full erase", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		ctrl := gomock.NewController(t)
 		mockClientSetInterface := mockclientset.NewMockClientSetInterface(ctrl)
@@ -111,7 +111,34 @@ func TestMachine(t *testing.T) {
 		mockMachineReleaser.EXPECT().WithErase().Return(mockMachineReleaser)
 		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
 
-		err := s.ReleaseMachine("abc123", true)
+		err := s.ReleaseMachine("abc123", infrav1beta1.EraseModeFull)
+		g.Expect(err).ToNot(HaveOccurred())
+	})
+
+	t.Run("release machine with quick erase", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		mockClientSetInterface := mockclientset.NewMockClientSetInterface(ctrl)
+		mockMachines := mockclientset.NewMockMachines(ctrl)
+		mockMachine := mockclientset.NewMockMachine(ctrl)
+		mockMachineReleaser := mockclientset.NewMockMachineReleaser(ctrl)
+
+		s := &Service{
+			scope: &scope.MachineScope{
+				Logger:  log,
+				Cluster: cluster,
+			},
+			maasClient: mockClientSetInterface,
+		}
+
+		mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
+		mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
+		mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
+		mockMachineReleaser.EXPECT().WithErase().Return(mockMachineReleaser)
+		mockMachineReleaser.EXPECT().WithQuickErase().Return(mockMachineReleaser)
+		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
+
+		err := s.ReleaseMachine("abc123", infrav1beta1.EraseModeQuick)
 		g.Expect(err).ToNot(HaveOccurred())
 	})
 
@@ -134,10 +161,35 @@ func TestMachine(t *testing.T) {
 		mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
 		mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
 		mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
-		// WithErase must not be called: an ordinary machine deletion never erases disks.
+		// WithErase and WithQuickErase must not be called.
 		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
 
-		err := s.ReleaseMachine("abc123", false)
+		err := s.ReleaseMachine("abc123", infrav1beta1.EraseModeNone)
+		g.Expect(err).ToNot(HaveOccurred())
+	})
+
+	t.Run("release machine with empty mode does not erase", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		mockClientSetInterface := mockclientset.NewMockClientSetInterface(ctrl)
+		mockMachines := mockclientset.NewMockMachines(ctrl)
+		mockMachine := mockclientset.NewMockMachine(ctrl)
+		mockMachineReleaser := mockclientset.NewMockMachineReleaser(ctrl)
+
+		s := &Service{
+			scope: &scope.MachineScope{
+				Logger:  log,
+				Cluster: cluster,
+			},
+			maasClient: mockClientSetInterface,
+		}
+
+		mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
+		mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
+		mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
+		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
+
+		err := s.ReleaseMachine("abc123", "")
 		g.Expect(err).ToNot(HaveOccurred())
 	})
 

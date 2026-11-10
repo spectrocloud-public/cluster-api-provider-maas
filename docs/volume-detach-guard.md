@@ -23,15 +23,28 @@ filesystem signatures are lost, and VMs on those disks fail at their next boot.
 - During a whole-cluster deletion, the guard is skipped only when the release will not erase. If
   the cluster deletion opts into an erase, the guard stays active.
 
-The release request itself is also gated:
+The release request itself is controlled by `spec.eraseDisksOnRelease` on the MaasCluster:
 
-- An individual machine deletion never sends `erase=true`.
-- A whole-cluster deletion sends `erase=true` only when the MaasCluster carries
-  `infrastructure.cluster.x-k8s.io/erase-disks-on-cluster-delete: "true"`.
+- `quick` (default): requests `erase=true` and `quick_erase=true`. MAAS runs `wipefs` on the
+  partitions and the disk, then writes 2 MiB of zeros at the start and end.
+- `full`: requests `erase=true` only. MAAS overwrites the whole device.
+- `none`: sends no erase request. Use it for SAN-backed clusters.
 
-Erase is therefore opt-in for whole-cluster deletions. This is a deliberate change from the
-previous erase-on-every-release behavior. Operators that relied on erase at cluster deletion must
-set the annotation, and should do so only when no LUNs are mapped to the hosts being released.
+The field applies to every release, including node replacement. The attachment guard still applies,
+so a release that will erase is held while volumes are attached.
+
+On a region with `enable_disk_erasing_on_release=true`, MAAS applies the region's quick and secure
+settings to every release and overrides the request, so the mode is not authoritative. The
+attachment guard remains the safety mechanism.
+
+To opt a SAN-backed cluster out of the provider erase:
+
+```
+kubectl -n <namespace> patch maascluster <name> --type=merge \
+  -p '{"spec":{"eraseDisksOnRelease":"none"}}'
+```
+
+Until Palette exposes the field directly, set it with the `maasCluster` passthrough override.
 
 The flag only controls the provider request. A MAAS region with
 `enable_disk_erasing_on_release=true` adds `wipe-disks` to every release on its own. The attachment
@@ -92,7 +105,12 @@ complete the detach.
 | Object | Annotation | Purpose |
 |---|---|---|
 | MaasMachine | `infrastructure.cluster.x-k8s.io/skip-volume-detach-guard: "true"` | Release without the attachment check. Use only after the volumes are detached or unmasked. |
-| MaasCluster | `infrastructure.cluster.x-k8s.io/erase-disks-on-cluster-delete: "true"` | Request a MAAS disk erase during a whole-cluster deletion. Individual machine deletions never erase. |
+
+## Configuration
+
+| Object | Field | Values | Purpose |
+|---|---|---|---|
+| MaasCluster | `spec.eraseDisksOnRelease` | `quick` (default), `full`, `none` | MAAS erase requested on release. Use `none` for SAN-backed clusters. |
 
 ## Follow-up
 

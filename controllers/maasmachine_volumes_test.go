@@ -49,51 +49,61 @@ func (f fakeClusterCache) GetUncachedClient(context.Context, client.ObjectKey) (
 	return f.workloadClient, f.err
 }
 
-func TestShouldEraseDisksOnRelease(t *testing.T) {
-	deletionTime := metav1.Now()
+func TestEraseModeForRelease(t *testing.T) {
 	tests := []struct {
-		name          string
-		cluster       *clusterv1.Cluster
-		maasCluster   *infrav1beta1.MaasCluster
-		expectedErase bool
+		name         string
+		clusterScope *scope.ClusterScope
+		expected     infrav1beta1.EraseMode
 	}{
 		{
-			name:          "no erase while the cluster is not being deleted",
-			cluster:       &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c"}},
-			maasCluster:   &infrav1beta1.MaasCluster{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{EraseDisksOnClusterDeleteAnnotation: "true"}}},
-			expectedErase: false,
+			name:         "nil cluster scope defaults to none",
+			clusterScope: nil,
+			expected:     infrav1beta1.EraseModeNone,
 		},
 		{
-			name:          "no erase on cluster deletion without the opt-in annotation",
-			cluster:       &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
-			maasCluster:   &infrav1beta1.MaasCluster{ObjectMeta: metav1.ObjectMeta{Name: "mc"}},
-			expectedErase: false,
+			name:         "missing MaasCluster defaults to none",
+			clusterScope: &scope.ClusterScope{},
+			expected:     infrav1beta1.EraseModeNone,
 		},
 		{
-			name:          "erase on cluster deletion with the opt-in annotation",
-			cluster:       &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
-			maasCluster:   &infrav1beta1.MaasCluster{ObjectMeta: metav1.ObjectMeta{Name: "mc", Annotations: map[string]string{EraseDisksOnClusterDeleteAnnotation: "true"}}},
-			expectedErase: true,
+			name:         "empty value defaults to quick",
+			clusterScope: &scope.ClusterScope{MaasCluster: &infrav1beta1.MaasCluster{}},
+			expected:     infrav1beta1.EraseModeQuick,
 		},
 		{
-			name:          "annotation value is case insensitive",
-			cluster:       &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
-			maasCluster:   &infrav1beta1.MaasCluster{ObjectMeta: metav1.ObjectMeta{Name: "mc", Annotations: map[string]string{EraseDisksOnClusterDeleteAnnotation: " TRUE "}}},
-			expectedErase: true,
+			name: "quick",
+			clusterScope: &scope.ClusterScope{MaasCluster: &infrav1beta1.MaasCluster{
+				Spec: infrav1beta1.MaasClusterSpec{EraseDisksOnRelease: infrav1beta1.EraseModeQuick},
+			}},
+			expected: infrav1beta1.EraseModeQuick,
 		},
 		{
-			name:          "no erase when MaasCluster is missing",
-			cluster:       &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", DeletionTimestamp: &deletionTime}},
-			maasCluster:   nil,
-			expectedErase: false,
+			name: "full",
+			clusterScope: &scope.ClusterScope{MaasCluster: &infrav1beta1.MaasCluster{
+				Spec: infrav1beta1.MaasClusterSpec{EraseDisksOnRelease: infrav1beta1.EraseModeFull},
+			}},
+			expected: infrav1beta1.EraseModeFull,
+		},
+		{
+			name: "none",
+			clusterScope: &scope.ClusterScope{MaasCluster: &infrav1beta1.MaasCluster{
+				Spec: infrav1beta1.MaasClusterSpec{EraseDisksOnRelease: infrav1beta1.EraseModeNone},
+			}},
+			expected: infrav1beta1.EraseModeNone,
+		},
+		{
+			name: "unrecognized value defaults to none",
+			clusterScope: &scope.ClusterScope{MaasCluster: &infrav1beta1.MaasCluster{
+				Spec: infrav1beta1.MaasClusterSpec{EraseDisksOnRelease: "unexpected"},
+			}},
+			expected: infrav1beta1.EraseModeNone,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
-			clusterScope := &scope.ClusterScope{Cluster: tt.cluster, MaasCluster: tt.maasCluster}
-			g.Expect(shouldEraseDisksOnRelease(clusterScope)).To(Equal(tt.expectedErase))
+			g.Expect(eraseModeForRelease(tt.clusterScope)).To(Equal(tt.expected))
 		})
 	}
 }

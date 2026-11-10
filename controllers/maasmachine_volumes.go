@@ -38,10 +38,6 @@ const (
 	// volumes are detached, or unmasked at the storage array, for the affected host.
 	SkipVolumeDetachGuardAnnotation = "infrastructure.cluster.x-k8s.io/skip-volume-detach-guard"
 
-	// EraseDisksOnClusterDeleteAnnotation opts a whole-cluster deletion into a MAAS disk
-	// erase. Individual machine deletions never request an erase, even when it is set.
-	EraseDisksOnClusterDeleteAnnotation = "infrastructure.cluster.x-k8s.io/erase-disks-on-cluster-delete"
-
 	// volumeDetachRequeueInterval is how often a held release is retried.
 	volumeDetachRequeueInterval = 30 * time.Second
 )
@@ -50,18 +46,24 @@ func boolAnnotation(annotations map[string]string, key string) bool {
 	return strings.EqualFold(strings.TrimSpace(annotations[key]), "true")
 }
 
-// shouldEraseDisksOnRelease reports whether this release may request a MAAS disk erase.
-// Erase is limited to a whole-cluster deletion with an explicit opt-in. MAAS treats
-// erase=true with neither quick_erase nor secure_erase as a full-device overwrite, so an
-// ordinary machine deletion must never ask for it.
-func shouldEraseDisksOnRelease(clusterScope *scope.ClusterScope) bool {
-	if clusterScope == nil || clusterScope.Cluster == nil || clusterScope.Cluster.DeletionTimestamp.IsZero() {
-		return false
+// eraseModeForRelease returns the configured MAAS erase mode for a release. An empty
+// value is treated as quick for objects created before the field existed. A missing
+// MaasCluster, or an unrecognized value, is treated as none: the mode cannot be read
+// safely, so do not request a destructive action.
+func eraseModeForRelease(clusterScope *scope.ClusterScope) infrav1beta1.EraseMode {
+	if clusterScope == nil || clusterScope.MaasCluster == nil {
+		return infrav1beta1.EraseModeNone
 	}
-	if clusterScope.MaasCluster == nil {
-		return false
+	switch mode := clusterScope.MaasCluster.Spec.EraseDisksOnRelease; mode {
+	case "", infrav1beta1.EraseModeQuick:
+		return infrav1beta1.EraseModeQuick
+	case infrav1beta1.EraseModeFull:
+		return infrav1beta1.EraseModeFull
+	case infrav1beta1.EraseModeNone:
+		return infrav1beta1.EraseModeNone
+	default:
+		return infrav1beta1.EraseModeNone
 	}
-	return boolAnnotation(clusterScope.MaasCluster.Annotations, EraseDisksOnClusterDeleteAnnotation)
 }
 
 // machineNodeName returns the workload cluster node name for the machine, or an empty
