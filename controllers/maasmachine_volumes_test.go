@@ -45,6 +45,10 @@ func (f fakeClusterCache) GetClient(context.Context, client.ObjectKey) (client.C
 	return f.workloadClient, f.err
 }
 
+func (f fakeClusterCache) GetUncachedClient(context.Context, client.ObjectKey) (client.Client, error) {
+	return f.workloadClient, f.err
+}
+
 func TestShouldEraseDisksOnRelease(t *testing.T) {
 	deletionTime := metav1.Now()
 	tests := []struct {
@@ -239,7 +243,7 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 			expectedHeld:   false,
 		},
 		{
-			name:           "not held when the force-release annotation is set",
+			name:           "not held when the skip guard annotation is set",
 			cluster:        &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c"}},
 			nodeName:       "node-a",
 			force:          true,
@@ -287,7 +291,7 @@ func TestHoldReleaseForAttachedVolumes(t *testing.T) {
 
 			maasMachine := &infrav1beta1.MaasMachine{ObjectMeta: metav1.ObjectMeta{Name: "mm"}}
 			if tt.force {
-				maasMachine.Annotations = map[string]string{ForceReleaseAnnotation: "true"}
+				maasMachine.Annotations = map[string]string{SkipVolumeDetachGuardAnnotation: "true"}
 			}
 			machine := &clusterv1.Machine{}
 			if tt.nodeName != "" {

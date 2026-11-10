@@ -130,10 +130,16 @@ func (s *Service) ReleaseMachine(systemID string, eraseDisks bool) error {
 	// request with erase=true and no flags is a full-device overwrite. It is never
 	// requested for an individual machine deletion, only for a whole-cluster deletion
 	// where the owning MaasCluster opts in explicitly.
+	//
+	// This flag only controls the request. A MAAS region with
+	// enable_disk_erasing_on_release=true adds wipe-disks to every release on its own,
+	// so eraseRequested=false is not a guarantee that the server will not erase. The
+	// release guard in the controller, which waits for volume detach, is the safety
+	// mechanism for attached volumes.
 	if eraseDisks {
 		releaser = releaser.WithErase()
 	}
-	s.scope.Info("Releasing MAAS machine", "systemID", systemID, "erase", eraseDisks)
+	s.scope.Info("Releasing MAAS machine", "systemID", systemID, "eraseRequested", eraseDisks)
 
 	_, err := releaser.Release(ctx)
 	if err != nil {
