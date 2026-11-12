@@ -60,6 +60,22 @@ spec:
                   on (e.g maas)
                 minLength: 1
                 type: string
+              eraseDisksOnRelease:
+                default: full
+                description: |-
+                  EraseDisksOnRelease selects the MAAS disk erase requested when a machine is
+                  released. full matches MAAS's behavior for a bare erase request and is the
+                  default. secure requests secure erase and falls back to a full wipe when the
+                  drive does not support it. quick runs MAAS quick erase (wipefs plus 2 MiB at
+                  both ends) and is faster. none disables the provider erase request.
+                  A MAAS region with enable_disk_erasing_on_release=true can still erase on its
+                  own; the volume detach guard is the safety mechanism for attached SAN LUNs.
+                enum:
+                - full
+                - secure
+                - quick
+                - none
+                type: string
               failureDomains:
                 description: |-
                   FailureDomains are not usually defined on the spec.

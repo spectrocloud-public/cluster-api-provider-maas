@@ -106,6 +106,16 @@ sudo ./lxd-test-linux --storage-backend=zfs --storage-size=50 --network-bridge=b
 ./maas-test-linux --test-vm-host --node-ip=<node-ip> --maas-endpoint=http://<maas-server>:5240/MAAS --maas-api-key="YOUR_MAAS_API_KEY" --zone=default --resource-pool=default
 ```
 
+## Volume detach guard
+
+CAPMAAS holds a MAAS release while the workload cluster still reports `VolumeAttachment` objects
+for the node, so a release cannot erase SAN LUNs that are still mapped. The erase requested on
+release is controlled by `spec.eraseDisksOnRelease` on the MaasCluster: `full` (default), `secure`,
+`quick`, or `none` for SAN-backed clusters.
+
+See [docs/volume-detach-guard.md](docs/volume-detach-guard.md) for the conditions, annotations and
+the operator runbook for a held release.
+
 ## Architecture
 
 The provider uses the MAAS API to manage machines and LXD VMs. It does not use direct LXD socket connections or CLI commands, ensuring it works correctly even when the controller is running on a different host than the LXD host.

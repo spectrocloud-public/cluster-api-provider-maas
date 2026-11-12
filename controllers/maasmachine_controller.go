@@ -170,7 +170,7 @@ func (r *MaasMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return r.reconcileNormal(ctx, machineScope, clusterScope)
 }
 
-func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope) (ctrl.Result, error) {
+func (r *MaasMachineReconciler) reconcileDelete(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope) (ctrl.Result, error) {
 	machineScope.Info("Reconciling MaasMachine delete")
 
 	maasMachine := machineScope.MaasMachine
@@ -223,15 +223,19 @@ func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope 
 		return ctrl.Result{}, err
 	}
 
-	// If LXD host feature is enabled and this is a control-plane node, proactively
-	// attempt to unregister the VM host before releasing the machine. This avoids
-	// MAAS 400 errors requiring VM host removal.
-	// unregister the VM host before releasing the machine so upgrades/deletes pass cleanly.
+	// Decide the erase mode for the release. The guard is independent of it:
+	// a region can erase on release even when the provider mode is none.
+	eraseMode := eraseModeForRelease(clusterScope)
+
+	if held, res := r.holdReleaseForAttachedVolumes(ctx, machineScope, clusterScope); held {
+		return res, nil
+	}
+
 	if clusterScope.IsLXDHostEnabled() && machineScope.IsControlPlane() {
 		r.bestEffortUnregisterLXDHost(clusterScope, machineScope, m)
 	}
 
-	if err := r.tryReleaseWithVMHostHandling(context.Background(), machineScope, clusterScope, machineSvc, m); err != nil {
+	if err := r.tryReleaseWithVMHostHandling(ctx, machineScope, clusterScope, machineSvc, m, eraseMode); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -281,8 +285,8 @@ func canonicalLXDHostName(hostname string) string {
 }
 
 // tryReleaseWithVMHostHandling releases the machine, handling VM host dependencies when required
-func (r *MaasMachineReconciler) tryReleaseWithVMHostHandling(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope, machineSvc *maasmachine.Service, m *infrav1beta1.Machine) error {
-	if err := machineSvc.ReleaseMachine(m.ID); err != nil {
+func (r *MaasMachineReconciler) tryReleaseWithVMHostHandling(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope, machineSvc *maasmachine.Service, m *infrav1beta1.Machine, eraseMode infrav1beta1.EraseMode) error {
+	if err := machineSvc.ReleaseMachine(m.ID, eraseMode); err != nil {
 		// If MAAS requires VM host removal first, attempt best-effort unregister and retry once
 		if isVMHostRemovalRequiredError(err) {
 			api := clusterScope.GetMaasClientIdentity()
@@ -303,7 +307,7 @@ func (r *MaasMachineReconciler) tryReleaseWithVMHostHandling(ctx context.Context
 			}
 			machineScope.Info("Unregistered LXD VM host prior to release", "hostName", hostName)
 			// retry release
-			if rerr := machineSvc.ReleaseMachine(m.ID); rerr != nil {
+			if rerr := machineSvc.ReleaseMachine(m.ID, eraseMode); rerr != nil {
 				machineScope.Error(rerr, "failed to release machine after unregistering VM host")
 				return rerr
 			}
