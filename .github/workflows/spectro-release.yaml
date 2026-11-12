@@ -65,8 +65,8 @@ jobs:
       -
         name: Build Image
         env:
-          GO_VERSION: 1.26.10
-          BUILDER_GOLANG_VERSION: 1.26.10
+          GO_VERSION: 1.26.11
+          BUILDER_GOLANG_VERSION: 1.26.11
           REGISTRY: ${{ env.LEGACY_REGISTRY }}
         run: |
           make docker-build-all STAGE=release VERSION=${{ env.SPECTRO_VERSION }}
@@ -77,8 +77,8 @@ jobs:
         name: Build Image - FIPS Mode
         env:
           FIPS_ENABLE: yes
-          GO_VERSION: 1.26.10
-          BUILDER_GOLANG_VERSION: 1.26.10
+          GO_VERSION: 1.26.11
+          BUILDER_GOLANG_VERSION: 1.26.11
           REGISTRY: ${{ env.FIPS_REGISTRY }}
         run: |
           make docker-build-all STAGE=release VERSION=${{ env.SPECTRO_VERSION }}
