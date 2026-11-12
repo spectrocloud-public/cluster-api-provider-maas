@@ -380,6 +380,40 @@ func (r *MaasMachineReconciler) findMachine(machineScope *scope.MachineScope, ma
 	return m, nil
 }
 
+// evacuationCompleted reports whether HMC has already evacuated the host backing this
+// MaasMachine. HMC writes the annotation after a successful evacuation and skips such
+// machines from then on.
+func evacuationCompleted(maasMachine *infrav1beta1.MaasMachine) bool {
+	return maasMachine != nil && maasMachine.Annotations[EvacuationCompletedAnnotation] != ""
+}
+
+// shouldAddEvacuationFinalizer reports whether the proactive host evacuation finalizer must be
+// ensured on this MaasMachine.
+//
+// The finalizer exists so a host cannot be released before its VMs are evacuated. The machine
+// controller adds it before deletion, and HMC removes it after a successful evacuation. Once
+// HMC has recorded completion with EvacuationCompletedAnnotation, the finalizer must not be
+// re-added: HMC will not run another evacuation for a completed host, so a re-added finalizer
+// would have no remover while the machine controller only requeues. A host with no completion
+// record still gets the finalizer, including during the drain window, so a machine that missed
+// the proactive add is still protected.
+func shouldAddEvacuationFinalizer(maasMachine *infrav1beta1.MaasMachine, clusterScope *scope.ClusterScope) bool {
+	if maasMachine == nil || clusterScope == nil || clusterScope.MaasCluster == nil {
+		return false
+	}
+	if !clusterScope.IsLXDHostEnabled() {
+		return false
+	}
+	isHostMachine := maasMachine.Spec.Parent == nil || *maasMachine.Spec.Parent == ""
+	if !isHostMachine {
+		return false
+	}
+	if controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
+		return false
+	}
+	return !evacuationCompleted(maasMachine)
+}
+
 func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope) (ctrl.Result, error) {
 	machineScope.Info("Reconciling MaasMachine")
 
@@ -391,16 +425,18 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 		return ctrl.Result{}, nil
 	}
 
-	// For host machines in HCP clusters (where LXD is enabled), proactively add the evacuation finalizer
-	// This ensures VMs are evacuated before the host is deleted
-	// This must be done BEFORE the machine starts being deleted, otherwise Kubernetes
-	// will reject the finalizer addition with "no new finalizers can be added if the object is being deleted"
+	// For host machines in HCP clusters (where LXD is enabled), proactively add the evacuation
+	// finalizer so VMs are evacuated before the host is deleted. A host machine without the
+	// finalizer returns here either way. The add is suppressed only after HMC has recorded a
+	// completed evacuation; see shouldAddEvacuationFinalizer.
 	isHostMachine := maasMachine.Spec.Parent == nil || *maasMachine.Spec.Parent == ""
 	isHCPCluster := clusterScope.IsLXDHostEnabled()
 
 	if isHostMachine && isHCPCluster && !controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
-		machineScope.Info("Adding evacuation finalizer to host machine in HCP cluster")
-		controllerutil.AddFinalizer(maasMachine, HostEvacuationFinalizer)
+		if shouldAddEvacuationFinalizer(maasMachine, clusterScope) {
+			machineScope.Info("Adding evacuation finalizer to host machine in HCP cluster")
+			controllerutil.AddFinalizer(maasMachine, HostEvacuationFinalizer)
+		}
 		return ctrl.Result{}, nil
 	}
 

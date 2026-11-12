@@ -185,8 +185,19 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 		return ctrl.Result{}, nil
 	}
 
-	// If evacuation already completed, do not start a new session
-	if maasMachine.Annotations != nil && maasMachine.Annotations[EvacuationCompletedAnnotation] != "" {
+	// If evacuation already completed, HMC's job is done. Do not start a new session. If the
+	// finalizer is present again, it was re-added by the machine controller, which reconciles
+	// independently and may not have observed the completion annotation yet. Removing this
+	// finalizer is HMC's job, so remove it instead of leaving the machine blocked forever.
+	if evacuationCompleted(maasMachine) {
+		if controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
+			log.Info("Evacuation already completed; removing re-added evacuation finalizer")
+			controllerutil.RemoveFinalizer(maasMachine, HostEvacuationFinalizer)
+			if err := r.Update(ctx, maasMachine); err != nil {
+				log.Error(err, "failed to remove re-added evacuation finalizer")
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+			}
+		}
 		log.V(1).Info("Evacuation already completed for host, skipping")
 		return ctrl.Result{}, nil
 	}
