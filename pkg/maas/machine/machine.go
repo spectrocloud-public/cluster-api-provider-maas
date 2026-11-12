@@ -119,17 +119,29 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 	return machine, nil
 }
 
-func (s *Service) ReleaseMachine(systemID string) error {
+func (s *Service) ReleaseMachine(systemID string, eraseDisks bool) error {
 	ctx := context.TODO()
 
-	// WithErase requests a full disk wipe on release so leftover data (e.g. rook-ceph
-	// OSD signatures, prior OS install) does not block reuse on the next cluster deploy.
-	// Without secure_erase/quick_erase, MAAS overwrites the whole disk with null bytes.
-	_, err := s.maasClient.Machines().
+	releaser := s.maasClient.Machines().
 		Machine(systemID).
-		Releaser().
-		WithErase().
-		Release(ctx)
+		Releaser()
+
+	// Erase is request-only. MAAS defaults secure_erase and quick_erase to false, so a
+	// request with erase=true and no flags is a full-device overwrite. It is never
+	// requested for an individual machine deletion, only for a whole-cluster deletion
+	// where the owning MaasCluster opts in explicitly.
+	//
+	// This flag only controls the request. A MAAS region with
+	// enable_disk_erasing_on_release=true adds wipe-disks to every release on its own,
+	// so eraseRequested=false is not a guarantee that the server will not erase. The
+	// release guard in the controller, which waits for volume detach, is the safety
+	// mechanism for attached volumes.
+	if eraseDisks {
+		releaser = releaser.WithErase()
+	}
+	s.scope.Info("Releasing MAAS machine", "systemID", systemID, "eraseRequested", eraseDisks)
+
+	_, err := releaser.Release(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to release machine")
 	}
