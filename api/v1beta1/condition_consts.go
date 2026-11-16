@@ -99,3 +99,16 @@ const (
 	// LXDSetupPendingReason documents LXD host setup in progress
 	LXDSetupPendingReason = "LXDSetupPending"
 )
+
+const (
+	// VolumeDetachPendingCondition documents that a machine release is held because the
+	// workload cluster still reports volumes attached to the machine's node.
+	VolumeDetachPendingCondition clusterv1.ConditionType = "VolumeDetachPending"
+
+	// WaitingForVolumeDetachReason documents a held release while volumes are attached.
+	WaitingForVolumeDetachReason = "WaitingForVolumeDetach"
+
+	// VolumeDetachCheckFailedReason documents a held release because the workload cluster
+	// could not be queried for attached volumes.
+	VolumeDetachCheckFailedReason = "VolumeDetachCheckFailed"
+)

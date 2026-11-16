@@ -405,6 +405,13 @@ func (s *ClusterScope) GetWorkloadClusterClient(ctx context.Context) (client.Cli
 	return s.tracker.GetClient(ctx, util.ObjectKey(s.Cluster))
 }
 
+// GetWorkloadClusterUncachedClient returns a live client for the workload cluster.
+// Use it for safety checks that must not rely on a cache that can lag or return an
+// empty result while the workload API is unreachable.
+func (s *ClusterScope) GetWorkloadClusterUncachedClient(ctx context.Context) (client.Client, error) {
+	return s.tracker.GetUncachedClient(ctx, util.ObjectKey(s.Cluster))
+}
+
 // EnsureClusterReadinessLabel sets the readiness label on the target cluster when API server is available
 func (s *ClusterScope) EnsureClusterReadinessLabel() error {
 	ctx := context.TODO()
