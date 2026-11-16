@@ -99,3 +99,34 @@ const (
 	// LXDSetupPendingReason documents LXD host setup in progress
 	LXDSetupPendingReason = "LXDSetupPending"
 )
+
+// Host evacuation conditions and reasons.
+//
+// S1 (PCP-7843) only wires the reasons the current HMC can determine:
+// VMsRemaining, WaitingForReplacement, EvacuationCheckFailed and
+// EvacuationComplete. The remaining reasons are defined now so later slices
+// (session ownership, dead-host verdict, timeout, skip-evacuation) share one
+// vocabulary; they are not set by S1.
+const (
+	// HostEvacuationReadyCondition reports whether the host is ready to be released.
+	HostEvacuationReadyCondition clusterv1.ConditionType = "HostEvacuationReady"
+
+	// HostEvacuationVMsRemainingReason means MAAS still lists VMs on the host.
+	HostEvacuationVMsRemainingReason = "VMsRemaining"
+
+	// HostEvacuationWaitingForReplacementReason means the host is empty but a
+	// replacement acknowledgement is still missing.
+	HostEvacuationWaitingForReplacementReason = "WaitingForReplacement"
+
+	// HostEvacuationCheckFailedReason means the evacuation state could not be read.
+	HostEvacuationCheckFailedReason = "EvacuationCheckFailed"
+
+	// HostEvacuationCompleteReason means HMC removed the evacuation finalizer.
+	HostEvacuationCompleteReason = "EvacuationComplete"
+
+	// Reserved for later slices.
+	HostEvacuationWaitingForSessionReason = "WaitingForSession"
+	HostEvacuationHostDeadReason          = "HostDead"
+	HostEvacuationTimedOutReason          = "EvacuationTimedOut"
+	HostEvacuationSkipRequestedReason     = "SkipEvacuationRequested"
+)

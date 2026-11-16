@@ -30,6 +30,9 @@ const (
 
 	// TagVMControlPlane marks a VM as a control-plane VM.
 	TagVMControlPlane = "maas-lxd-wlc-cp"
+	// TagVMWorker marks a VM as a workload-cluster worker VM. Assigned from S2
+	// onwards; S1 uses it only to classify VMs for the evacuation condition.
+	TagVMWorker = "maas-lxd-wlc-worker"
 	// TagVMClusterPrefix prefixes the owning WLC cluster identifier.
 	TagVMClusterPrefix = "maas-lxd-wlc-"
 	// TagVMReadyOpPrefix prefixes the ready acknowledgement for a given session opId.

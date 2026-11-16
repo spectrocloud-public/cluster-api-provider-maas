@@ -49,6 +49,10 @@ type HMCMaintenanceReconciler struct {
 	Namespace string
 	// GenericEventChannel allows external triggers to enqueue reconcile requests
 	GenericEventChannel chan event.GenericEvent
+
+	// evacuationState deduplicates the requeue log and EvacuationBlocked event:
+	// one line/event per distinct VM set, not one every 10s.
+	evacuationState evacuationStateTracker
 }
 
 // EvacuationCompletedAnnotation marks a MaasMachine that has already completed
@@ -198,6 +202,11 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 			}
 		}
+		if err := setHostEvacuationCondition(ctx, r.Client, maasMachine, corev1.ConditionTrue,
+			infrav1beta1.HostEvacuationCompleteReason, clusterv1.ConditionSeverityNone, "evacuation already completed"); err != nil {
+			log.Error(err, "failed to set HostEvacuationReady condition")
+		}
+		r.evacuationState.forget(evacuationStateKey(maasMachine))
 		log.V(1).Info("Evacuation already completed for host, skipping")
 		return ctrl.Result{}, nil
 	}
@@ -216,6 +225,7 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 	st, _, err := maint.LoadSession(ctx, r.Client, maasMachine.Namespace)
 	if err != nil {
 		log.Error(err, "failed to load maintenance session")
+		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 	}
 
@@ -225,6 +235,7 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 			st, err = maint.StartSession(ctx, r.Client, maasMachine.Namespace, *maasMachine.Spec.SystemID)
 			if err != nil {
 				log.Error(err, "failed to start maintenance session")
+				r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 			}
 			log.Info("Maintenance session started", "opId", st.OpID, "host", st.CurrentHost)
@@ -236,7 +247,9 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 	// Get system ID
 	if maasMachine.Spec.SystemID == nil {
 		log.Error(nil, "MaasMachine has no systemID")
-		return ctrl.Result{}, fmt.Errorf("maasMachine has no systemID")
+		cause := fmt.Errorf("maasMachine has no systemID")
+		r.setEvacuationCheckFailed(ctx, maasMachine, log, cause)
+		return ctrl.Result{}, cause
 	}
 	hostSystemID := *maasMachine.Spec.SystemID
 
@@ -244,20 +257,23 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 	maasClient, err := maint.NewMAASClient(r.Client, maasMachine.Namespace)
 	if err != nil {
 		log.Error(err, "failed to create MAAS client")
+		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 	}
 	tagService := maint.NewTagService(maasClient)
 
 	if err := maint.EnsureHostMaintenanceTags(tagService, hostSystemID, st.OpID); err != nil {
 		log.Error(err, "failed to ensure maintenance tags")
+		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 	}
 	log.Info("Maintenance tags ensured", "host", hostSystemID, "opId", st.OpID)
 
 	// Create host maintenance service
-	hmcService, err := NewHostMaintenanceService(r.Client, maasMachine.Namespace, r.Recorder)
+	hmcService, err := NewHostMaintenanceService(r.Client, maasMachine.Namespace)
 	if err != nil {
 		log.Error(err, "failed to create host maintenance service")
+		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 	}
 
@@ -265,20 +281,33 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 	evacuationReady, err := hmcService.CheckEvacuationGates(ctx, maasMachine, log)
 	if err != nil {
 		log.Error(err, "failed to check evacuation gates")
+		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 	}
 
 	if !evacuationReady {
-		log.Info("Evacuation gates not met, blocking deletion",
-			"host", hostSystemID,
-			"requeueAfter", 10*time.Second)
+		r.reportEvacuationBlocked(ctx, maasMachine, hmcService, log, hostSystemID, st.OpID)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	// Evacuation gates are met, clear tags and remove finalizer
 	if err := hmcService.ClearMaintenanceTagsAndRemoveFinalizer(ctx, maasMachine, log); err != nil {
 		log.Error(err, "failed to clear maintenance tags and remove finalizer")
+		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+	}
+
+	// The finalizer is gone, so the release can proceed; record the terminal
+	// state before the annotation/session bookkeeping.
+	if err := setHostEvacuationCondition(ctx, r.Client, maasMachine, corev1.ConditionTrue,
+		infrav1beta1.HostEvacuationCompleteReason, clusterv1.ConditionSeverityNone,
+		fmt.Sprintf("opID=%s; host %s evacuated; finalizer removed", st.OpID, hostSystemID)); err != nil {
+		log.Error(err, "failed to set HostEvacuationReady condition")
+	}
+	r.evacuationState.forget(evacuationStateKey(maasMachine))
+	if r.Recorder != nil {
+		r.Recorder.Eventf(maasMachine, corev1.EventTypeNormal, HostEvacuationCompletedEvent,
+			"Host %s evacuated (opID %s)", hostSystemID, st.OpID)
 	}
 
 	// Mark evacuation completed on the MaasMachine to prevent future sessions
@@ -314,6 +343,79 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 
 	log.Info("Host evacuation completed successfully", "host", hostSystemID, "opID", st.OpID)
 	return ctrl.Result{}, nil
+}
+
+// reportEvacuationBlocked publishes the current evacuation state on the host
+// MaasMachine. It emits an event and a state-change log line only when the VM
+// set or the reason changes, not on every 10s requeue.
+func (r *HMCMaintenanceReconciler) reportEvacuationBlocked(
+	ctx context.Context,
+	maasMachine *infrav1beta1.MaasMachine,
+	svc *HostMaintenanceService,
+	log logr.Logger,
+	hostSystemID, opID string,
+) {
+	vms, err := svc.ListHostVMs(hostSystemID)
+	if err != nil {
+		log.Error(err, "failed to list host VMs for evacuation condition")
+		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
+		return
+	}
+	r.reportEvacuationSnapshot(ctx, maasMachine, log, hostSystemID, opID, vms)
+}
+
+// reportEvacuationSnapshot is the testable half of reportEvacuationBlocked.
+func (r *HMCMaintenanceReconciler) reportEvacuationSnapshot(
+	ctx context.Context,
+	maasMachine *infrav1beta1.MaasMachine,
+	log logr.Logger,
+	hostSystemID, opID string,
+	vms []maint.Machine,
+) {
+	snap := buildHostEvacuationSnapshot(vms)
+	reason := infrav1beta1.HostEvacuationVMsRemainingReason
+	severity := clusterv1.ConditionSeverityWarning
+	eventReason := HostEvacuationBlockedEvent
+	if snap.Total == 0 {
+		reason = infrav1beta1.HostEvacuationWaitingForReplacementReason
+		severity = clusterv1.ConditionSeverityInfo
+		eventReason = WLCReplacementPendingEvent
+	}
+
+	message := buildHostEvacuationMessage(opID, snap)
+	if err := setHostEvacuationCondition(ctx, r.Client, maasMachine, corev1.ConditionFalse, reason, severity, message); err != nil {
+		log.Error(err, "failed to set HostEvacuationReady condition")
+	}
+
+	key := evacuationStateKey(maasMachine)
+	if r.evacuationState.changed(key, opID+"|"+reason+"|"+snap.Signature) {
+		log.Info("Host evacuation blocked",
+			"host", hostSystemID, "opID", opID, "reason", reason,
+			"remainingVMs", snap.Total, "detail", message)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(maasMachine, corev1.EventTypeWarning, eventReason, "%s", message)
+		}
+		return
+	}
+	log.V(2).Info("Host evacuation state unchanged",
+		"host", hostSystemID, "opID", opID, "reason", reason, "remainingVMs", snap.Total)
+}
+
+// setEvacuationCheckFailed records a failed gate/session check on the machine.
+func (r *HMCMaintenanceReconciler) setEvacuationCheckFailed(
+	ctx context.Context,
+	maasMachine *infrav1beta1.MaasMachine,
+	log logr.Logger,
+	cause error,
+) {
+	if cause == nil {
+		return
+	}
+	message := fmt.Sprintf("evacuation check failed: %v", cause)
+	if err := setHostEvacuationCondition(ctx, r.Client, maasMachine, corev1.ConditionFalse,
+		infrav1beta1.HostEvacuationCheckFailedReason, clusterv1.ConditionSeverityWarning, message); err != nil {
+		log.Error(err, "failed to set HostEvacuationReady condition")
+	}
 }
 
 func (r *HMCMaintenanceReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, options controller.Options) error {
