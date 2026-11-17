@@ -43,7 +43,6 @@ type vmClass string
 
 const (
 	vmClassControlPlane vmClass = "wlc-cp"
-	vmClassWorker       vmClass = "wlc-worker"
 	vmClassUnmanaged    vmClass = "unmanaged"
 )
 
@@ -85,16 +84,13 @@ func buildHostEvacuationSnapshot(vms []maint.Machine) hostEvacuationSnapshot {
 	return snap
 }
 
-// classifyMaintenanceVM identifies the owner class from MAAS tags. The worker
-// tag is assigned from S2 onwards; until then non-CP VMs are reported as
-// unmanaged, which is accurate for the current code.
+// classifyMaintenanceVM identifies the owner class from MAAS tags. Worker VM
+// tags are a future improvement (F3); until they exist, non-CP VMs, including
+// LXD worker VMs, are reported as unmanaged.
 func classifyMaintenanceVM(vm maint.Machine) vmClass {
 	for _, tag := range vm.Tags {
-		switch tag {
-		case maint.TagVMControlPlane:
+		if tag == maint.TagVMControlPlane {
 			return vmClassControlPlane
-		case maint.TagVMWorker:
-			return vmClassWorker
 		}
 	}
 	return vmClassUnmanaged
@@ -123,8 +119,8 @@ func buildHostEvacuationMessage(opID string, snap hostEvacuationSnapshot) string
 		return fmt.Sprintf("opID=%s; host is empty; waiting for replacement acknowledgement", opID)
 	}
 	msg := fmt.Sprintf(
-		"opID=%s; %d VM(s) remaining (wlc-cp=%d, wlc-worker=%d, unmanaged=%d)",
-		opID, snap.Total, snap.Counts[vmClassControlPlane], snap.Counts[vmClassWorker], snap.Counts[vmClassUnmanaged],
+		"opID=%s; %d VM(s) remaining (wlc-cp=%d, unmanaged=%d)",
+		opID, snap.Total, snap.Counts[vmClassControlPlane], snap.Counts[vmClassUnmanaged],
 	)
 	if len(snap.Names) > 0 {
 		msg += ": " + strings.Join(snap.Names, ", ")

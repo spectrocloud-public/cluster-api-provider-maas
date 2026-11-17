@@ -49,7 +49,7 @@ func TestClassifyMaintenanceVM(t *testing.T) {
 		want vmClass
 	}{
 		{name: "control plane", vm: vm("vm-1", maint.TagVMControlPlane, "maas-lxd-wlc-abc"), want: vmClassControlPlane},
-		{name: "worker", vm: vm("vm-2", maint.TagVMWorker, "maas-lxd-wlc-abc"), want: vmClassWorker},
+		{name: "worker tag is unmanaged until F3", vm: vm("vm-2", "maas-lxd-wlc-worker", "maas-lxd-wlc-abc"), want: vmClassUnmanaged},
 		{name: "unmanaged", vm: vm("vm-3", "some-other-tag"), want: vmClassUnmanaged},
 		{name: "no tags", vm: vm("vm-4"), want: vmClassUnmanaged},
 	}
@@ -68,7 +68,7 @@ func TestBuildHostEvacuationSnapshot(t *testing.T) {
 		vm("vm-2", maint.TagVMControlPlane),
 		vm("vm-4"),
 		vm("vm-1", maint.TagVMControlPlane),
-		vm("vm-5", maint.TagVMWorker),
+		vm("vm-5", "maas-lxd-wlc-worker"),
 		vm("vm-3"),
 	}
 
@@ -79,11 +79,8 @@ func TestBuildHostEvacuationSnapshot(t *testing.T) {
 	if got := snap.Counts[vmClassControlPlane]; got != 2 {
 		t.Errorf("control-plane count = %d, want 2", got)
 	}
-	if got := snap.Counts[vmClassWorker]; got != 1 {
-		t.Errorf("worker count = %d, want 1", got)
-	}
-	if got := snap.Counts[vmClassUnmanaged]; got != 3 {
-		t.Errorf("unmanaged count = %d, want 3", got)
+	if got := snap.Counts[vmClassUnmanaged]; got != 4 {
+		t.Errorf("unmanaged count = %d, want 4", got)
 	}
 	if len(snap.Names) != 5 {
 		t.Errorf("first-five names = %d, want 5", len(snap.Names))
@@ -107,14 +104,17 @@ func TestBuildHostEvacuationMessage(t *testing.T) {
 
 	snap := buildHostEvacuationSnapshot([]maint.Machine{
 		vm("vm-1", maint.TagVMControlPlane),
-		vm("vm-2", maint.TagVMWorker),
+		vm("vm-2", "maas-lxd-wlc-worker"),
 		vm("vm-3"),
 	})
 	got := buildHostEvacuationMessage("op-1", snap)
-	for _, want := range []string{"opID=op-1", "3 VM(s) remaining", "wlc-cp=1", "wlc-worker=1", "unmanaged=1", "vm-1 (wlc-cp)"} {
+	for _, want := range []string{"opID=op-1", "3 VM(s) remaining", "wlc-cp=1", "unmanaged=2", "vm-1 (wlc-cp)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message %q does not contain %q", got, want)
 		}
+	}
+	if strings.Contains(got, "wlc-worker") {
+		t.Errorf("message %q must not classify a worker before F3", got)
 	}
 }
 
