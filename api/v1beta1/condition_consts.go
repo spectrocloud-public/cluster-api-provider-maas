@@ -99,3 +99,24 @@ const (
 	// LXDSetupPendingReason documents LXD host setup in progress
 	LXDSetupPendingReason = "LXDSetupPending"
 )
+
+// Release conditions and reasons (S4).
+const (
+	// ReleaseReadyCondition reports whether the VM/host release can proceed.
+	ReleaseReadyCondition clusterv1.ConditionType = "ReleaseReady"
+
+	// ReleaseFailedReason means release returned a retryable error.
+	ReleaseFailedReason = "ReleaseFailed"
+
+	// ReleaseBlockedReason means release needs operator action (guest VMs present).
+	ReleaseBlockedReason = "ReleaseBlocked"
+
+	// VMDeleteFailedReason means the dynamic LXD VM record could not be deleted.
+	VMDeleteFailedReason = "VMDeleteFailed"
+
+	// ReleaseCompleteReason means release (or the dead-parent record delete) succeeded.
+	ReleaseCompleteReason = "Released"
+
+	// MarkedBrokenReason is reserved for S6's Broken retirement.
+	MarkedBrokenReason = "MarkedBroken"
+)

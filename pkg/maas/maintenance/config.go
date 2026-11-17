@@ -57,6 +57,24 @@ type VECConfig struct {
 	CheckAPIPath string
 }
 
+// ReleaseConfig configures VM release retries and per-call timeouts.
+type ReleaseConfig struct {
+	CallTimeout    time.Duration
+	RetryBudget    time.Duration
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+}
+
+// DefaultReleaseConfig returns the S4 defaults.
+func DefaultReleaseConfig() ReleaseConfig {
+	return ReleaseConfig{
+		CallTimeout:    3 * time.Minute,
+		RetryBudget:    15 * time.Minute,
+		InitialBackoff: 30 * time.Second,
+		MaxBackoff:     5 * time.Minute,
+	}
+}
+
 // DefaultHMCConfig returns conservative defaults for HMC operation.
 func DefaultHMCConfig() HMCConfig {
 	return HMCConfig{

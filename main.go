@@ -61,6 +61,10 @@ var (
 	webhookPort          int
 	watchNamespace       string
 	clusterRole          string
+
+	releaseCallTimeout   time.Duration
+	releaseRetryBudget   time.Duration
+	autoDeadHostRecovery bool
 )
 
 const (
@@ -175,10 +179,13 @@ func main() {
 		}
 
 		if err := (&controllers.MaasMachineReconciler{
-			Client:   mgr.GetClient(),
-			Log:      ctrl.Log.WithName("controllers").WithName("MaasMachine"),
-			Recorder: mgr.GetEventRecorderFor("maasmachine-controller"),
-			Tracker:  clusterCache,
+			Client:               mgr.GetClient(),
+			Log:                  ctrl.Log.WithName("controllers").WithName("MaasMachine"),
+			Recorder:             mgr.GetEventRecorderFor("maasmachine-controller"),
+			Tracker:              clusterCache,
+			ReleaseCallTimeout:   releaseCallTimeout,
+			ReleaseRetryBudget:   releaseRetryBudget,
+			AutoDeadHostRecovery: autoDeadHostRecovery,
 		}).SetupWithManager(ctx, mgr, concurrency(machineConcurrency)); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "MaasMachine")
 			os.Exit(1)
@@ -266,6 +273,12 @@ func initFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&clusterRole, "cluster-role", "",
 		"Role of this cluster: 'hcp' (Host Control Plane) or 'wlc' (Workload Cluster). When set to 'wlc', enables VM evacuation controller.",
 	)
+	fs.DurationVar(&releaseCallTimeout, "release-call-timeout", 3*time.Minute,
+		"Per-call timeout for MAAS release, power and delete operations.")
+	fs.DurationVar(&releaseRetryBudget, "release-retry-budget", 15*time.Minute,
+		"How long a live-host release keeps retrying before settling at the maximum backoff.")
+	fs.BoolVar(&autoDeadHostRecovery, "auto-dead-host-recovery", true,
+		"Allow the release path to delete a VM's MAAS record when its parent host is marked host-dead.")
 
 	feature.MutableGates.AddFlag(fs)
 }

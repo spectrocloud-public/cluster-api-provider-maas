@@ -25,6 +25,8 @@ const (
 	TagHostMaintenance = "maas-lxd-host-maintenance"
 	// TagHostNoSchedule prevents new placements on the host during maintenance.
 	TagHostNoSchedule = "maas-lxd-host-noschedule"
+	// TagHostDead marks a host the dead-host verdict has declared unreachable.
+	TagHostDead = "maas-lxd-host-dead"
 	// TagHostOpPrefix prefixes the maintenance session opId stored as a tag.
 	TagHostOpPrefix = "maas-lxd-hcp-op-"
 

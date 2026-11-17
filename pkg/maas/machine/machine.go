@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/maintenance"
@@ -119,22 +120,87 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 	return machine, nil
 }
 
-func (s *Service) ReleaseMachine(systemID string) error {
-	ctx := context.TODO()
+// ReleaseOptions controls a MAAS release. Erase is true only for the normal
+// release of a host that is not marked host-dead.
+type ReleaseOptions struct {
+	Erase   bool
+	Timeout time.Duration
+}
 
-	// WithErase requests a full disk wipe on release so leftover data (e.g. rook-ceph
-	// OSD signatures, prior OS install) does not block reuse on the next cluster deploy.
-	// Without secure_erase/quick_erase, MAAS overwrites the whole disk with null bytes.
-	_, err := s.maasClient.Machines().
-		Machine(systemID).
-		Releaser().
-		WithErase().
-		Release(ctx)
+func (s *Service) ReleaseMachine(ctx context.Context, systemID string, opts ReleaseOptions) error {
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 3 * time.Minute
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	releaser := s.maasClient.Machines().Machine(systemID).Releaser()
+	if opts.Erase {
+		// WithErase requests a full disk wipe on release so leftover data (e.g. rook-ceph
+		// OSD signatures, prior OS install) does not block reuse on the next cluster deploy.
+		// Without secure_erase/quick_erase, MAAS overwrites the whole disk with null bytes.
+		releaser = releaser.WithErase()
+	}
+	_, err := releaser.Release(cctx)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to release machine")
 	}
 
 	return nil
+}
+
+// ParentHostTags returns the parent system ID and tags of the VM host that
+// owns an LXD VM. The parent is empty for bare metal.
+func (s *Service) ParentHostTags(ctx context.Context, systemID string, timeout time.Duration) (string, []string, error) {
+	if timeout <= 0 {
+		timeout = 3 * time.Minute
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	m, err := s.maasClient.Machines().Machine(systemID).Get(cctx)
+	if err != nil {
+		return "", nil, err
+	}
+	parent := m.Parent()
+	if parent == "" {
+		return "", nil, nil
+	}
+	host, err := s.maasClient.Machines().Machine(parent).Get(cctx)
+	if err != nil {
+		return parent, nil, err
+	}
+	return parent, host.Tags(), nil
+}
+
+// DeleteMachineRecord deletes the MAAS machine record without a release, power
+// off, or erase. Used for a VM whose parent host is marked host-dead.
+func (s *Service) DeleteMachineRecord(ctx context.Context, systemID string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 3 * time.Minute
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return s.maasClient.Machines().Machine(systemID).Delete(cctx)
+}
+
+// DeleteDynamicLXDVM deletes the MAAS record for a dynamically composed LXD VM.
+func (s *Service) DeleteDynamicLXDVM(ctx context.Context, systemID string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 3 * time.Minute
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	m, err := s.maasClient.Machines().Machine(systemID).Get(cctx)
+	if err != nil {
+		return err
+	}
+	if m.PowerType() != "lxd" {
+		return fmt.Errorf("machine %s is not an LXD VM (power_type: %s)", systemID, m.PowerType())
+	}
+	return s.maasClient.Machines().Machine(systemID).Delete(cctx)
 }
 
 func (s *Service) DeployMachine(userDataB64 string) (_ *infrav1beta1.Machine, rerr error) {
