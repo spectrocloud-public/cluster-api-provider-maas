@@ -47,15 +47,28 @@ type MaasClusterSpec struct {
 	// +optional
 	LXDConfig *LXDConfig `json:"lxdConfig,omitempty"`
 
-	// EraseDisksOnRelease requests a MAAS disk erase when a machine is released.
-	// False, the default, keeps the previous release behavior and does not request
-	// a wipe. Set it to true to request the cleanup explicitly. Palette sets this
-	// through the maasCluster key in overrideClusterAPIConfig.
+	// EraseDisksOnRelease selects the MAAS disk erase requested when a machine is
+	// released. none, the default, sends no erase request, which is the previous
+	// release behavior. full sends erase=true and overwrites the whole disk. quick
+	// adds quick_erase=true: wipefs plus 2 MiB of zeros at the start and end of the
+	// disk. secure adds secure_erase=true: the drive's secure erase, falling back to
+	// a full wipe when the drive does not support it.
 	// A region with enable_disk_erasing_on_release=true can still erase on its own.
-	// +kubebuilder:default=false
+	// +kubebuilder:validation:Enum=none;full;quick;secure
+	// +kubebuilder:default=none
 	// +optional
-	EraseDisksOnRelease bool `json:"eraseDisksOnRelease,omitempty"`
+	EraseDisksOnRelease EraseMode `json:"eraseDisksOnRelease,omitempty"`
 }
+
+// EraseMode selects the MAAS disk erase requested on release.
+type EraseMode string
+
+const (
+	EraseModeNone   EraseMode = "none"
+	EraseModeFull   EraseMode = "full"
+	EraseModeQuick  EraseMode = "quick"
+	EraseModeSecure EraseMode = "secure"
+)
 
 // LXDConfig contains the configuration for LXD hosts
 type LXDConfig struct {

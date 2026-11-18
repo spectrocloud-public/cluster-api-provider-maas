@@ -89,56 +89,65 @@ func TestMachine(t *testing.T) {
 		}))
 	})
 
-	t.Run("release machine without erase", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		mockClientSetInterface := mockclientset.NewMockClientSetInterface(ctrl)
-		mockMachines := mockclientset.NewMockMachines(ctrl)
-		mockMachine := mockclientset.NewMockMachine(ctrl)
-		mockMachineReleaser := mockclientset.NewMockMachineReleaser(ctrl)
-
-		s := &Service{
-			scope: &scope.MachineScope{
-				Logger:  log,
-				Cluster: cluster,
-			},
-			maasClient: mockClientSetInterface,
+	t.Run("release machine erase modes", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			mode        infrav1beta1.EraseMode
+			erase       bool
+			quick       bool
+			secure      bool
+			expectError bool
+		}{
+			{name: "empty mode sends no erase", mode: ""},
+			{name: "none sends no erase", mode: infrav1beta1.EraseModeNone},
+			{name: "full sends erase only", mode: infrav1beta1.EraseModeFull, erase: true},
+			{name: "quick sends erase and quick_erase", mode: infrav1beta1.EraseModeQuick, erase: true, quick: true},
+			{name: "secure sends erase and secure_erase", mode: infrav1beta1.EraseModeSecure, erase: true, secure: true},
+			{name: "unknown mode is rejected before release", mode: "wipe", expectError: true},
 		}
 
-		mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
-		mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
-		mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
-		// WithErase must not be called: the default release does not request a disk wipe.
-		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				g := NewGomegaWithT(t)
+				ctrl := gomock.NewController(t)
+				mockClientSetInterface := mockclientset.NewMockClientSetInterface(ctrl)
+				mockMachines := mockclientset.NewMockMachines(ctrl)
+				mockMachine := mockclientset.NewMockMachine(ctrl)
+				mockMachineReleaser := mockclientset.NewMockMachineReleaser(ctrl)
 
-		err := s.ReleaseMachine("abc123", false)
-		g.Expect(err).ToNot(HaveOccurred())
-	})
+				s := &Service{
+					scope: &scope.MachineScope{
+						Logger:  log,
+						Cluster: cluster,
+					},
+					maasClient: mockClientSetInterface,
+				}
 
-	t.Run("release machine with explicit erase", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		mockClientSetInterface := mockclientset.NewMockClientSetInterface(ctrl)
-		mockMachines := mockclientset.NewMockMachines(ctrl)
-		mockMachine := mockclientset.NewMockMachine(ctrl)
-		mockMachineReleaser := mockclientset.NewMockMachineReleaser(ctrl)
+				mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
+				mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
+				mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
+				if tt.erase {
+					mockMachineReleaser.EXPECT().WithErase().Return(mockMachineReleaser)
+				}
+				if tt.quick {
+					mockMachineReleaser.EXPECT().WithQuickErase().Return(mockMachineReleaser)
+				}
+				if tt.secure {
+					mockMachineReleaser.EXPECT().WithSecureErase().Return(mockMachineReleaser)
+				}
+				if !tt.expectError {
+					mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
+				}
 
-		s := &Service{
-			scope: &scope.MachineScope{
-				Logger:  log,
-				Cluster: cluster,
-			},
-			maasClient: mockClientSetInterface,
+				err := s.ReleaseMachine("abc123", tt.mode)
+				if tt.expectError {
+					g.Expect(err).To(HaveOccurred())
+					g.Expect(err.Error()).To(ContainSubstring("unsupported erase mode"))
+				} else {
+					g.Expect(err).ToNot(HaveOccurred())
+				}
+			})
 		}
-
-		mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
-		mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
-		mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
-		mockMachineReleaser.EXPECT().WithErase().Return(mockMachineReleaser)
-		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
-
-		err := s.ReleaseMachine("abc123", true)
-		g.Expect(err).ToNot(HaveOccurred())
 	})
 
 	//t.Run("deploy machine with success", func(t *testing.T) {

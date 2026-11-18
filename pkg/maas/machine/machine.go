@@ -119,21 +119,28 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 	return machine, nil
 }
 
-func (s *Service) ReleaseMachine(systemID string, eraseDisks bool) error {
+func (s *Service) ReleaseMachine(systemID string, eraseMode infrav1beta1.EraseMode) error {
 	ctx := context.TODO()
 
-	// Erase is off unless MaasCluster.spec.eraseDisksOnRelease is true. MAAS
-	// wipe-disks erases every writable disk the host can see, including SAN LUNs
-	// that are still mapped. Palette sets the field through the maasCluster
-	// passthrough. A region with enable_disk_erasing_on_release=true can still
-	// erase on its own.
+	// MAAS wipe-disks erases every writable disk the host can see, including SAN
+	// LUNs that are still mapped, so erase is requested only when the MaasCluster
+	// sets it. A region with enable_disk_erasing_on_release=true can still erase
+	// on its own.
 	releaser := s.maasClient.Machines().
 		Machine(systemID).
 		Releaser()
-	if eraseDisks {
+	switch eraseMode {
+	case infrav1beta1.EraseModeNone, "":
+	case infrav1beta1.EraseModeFull:
 		releaser = releaser.WithErase()
+	case infrav1beta1.EraseModeQuick:
+		releaser = releaser.WithErase().WithQuickErase()
+	case infrav1beta1.EraseModeSecure:
+		releaser = releaser.WithErase().WithSecureErase()
+	default:
+		return errors.Errorf("unsupported erase mode %q", eraseMode)
 	}
-	s.scope.Info("Releasing MAAS machine", "systemID", systemID, "eraseRequested", eraseDisks)
+	s.scope.Info("Releasing MAAS machine", "systemID", systemID, "eraseMode", eraseMode)
 	_, err := releaser.Release(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to release machine")
