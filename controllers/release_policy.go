@@ -282,9 +282,10 @@ func (r *MaasMachineReconciler) reportReleaseStuckIfNeeded(
 }
 
 func releaseOverBudget(state releaseAttempts, cfg maint.ReleaseConfig) bool {
-	ref := state.SubmitTime
+	// The budget runs from the first failure, not from the latest resubmit.
+	ref := state.FirstFailure
 	if ref == "" {
-		ref = state.FirstFailure
+		ref = state.SubmitTime
 	}
 	if ref == "" || cfg.RetryBudget <= 0 {
 		return false

@@ -143,6 +143,13 @@ func TestReleaseBackoff(t *testing.T) {
 	if releaseOverBudget(fresh, cfg) {
 		t.Error("fresh submit should not be over budget")
 	}
+	resubmitted := releaseAttempts{
+		FirstFailure: time.Now().Add(-31 * time.Minute).UTC().Format(time.RFC3339),
+		SubmitTime:   time.Now().UTC().Format(time.RFC3339),
+	}
+	if !releaseOverBudget(resubmitted, cfg) {
+		t.Error("resubmit must not reset the budget")
+	}
 }
 
 func TestReleaseAttemptsRecordAndClear(t *testing.T) {
