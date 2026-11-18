@@ -42,14 +42,15 @@ import (
 )
 
 type fakeReleaseService struct {
-	parentID   string
-	parentTags []string
-	parentErr  error
-	releaseErr error
-	recordErr  error
-	dynamicErr error
-	state      infrav1beta1.MachineState
-	stateErr   error
+	parentID      string
+	parentTags    []string
+	parentErr     error
+	releaseErr    error
+	releaseErrSeq []error
+	recordErr     error
+	dynamicErr    error
+	state         infrav1beta1.MachineState
+	stateErr      error
 
 	releaseCalled bool
 	releaseCalls  int
@@ -68,8 +69,12 @@ func (f *fakeReleaseService) GetMachineState(context.Context, string, time.Durat
 
 func (f *fakeReleaseService) ReleaseMachine(_ context.Context, _ string, opts maasmachine.ReleaseOptions) error {
 	f.releaseCalled = true
+	idx := f.releaseCalls
 	f.releaseCalls++
 	f.lastOpts = opts
+	if idx < len(f.releaseErrSeq) {
+		return f.releaseErrSeq[idx]
+	}
 	return f.releaseErr
 }
 
@@ -339,6 +344,63 @@ func TestReleaseMachineEraseSelection(t *testing.T) {
 	}
 	if dead.lastOpts.Erase {
 		t.Error("host-dead release must not erase when the flag is off")
+	}
+}
+
+func TestReleaseGuestVMsBlockedWithoutSkip(t *testing.T) {
+	mm := &infrav1beta1.MaasMachine{ObjectMeta: metav1.ObjectMeta{Name: "vm", Namespace: "default"}}
+	r, _ := newReleaseTestReconciler(t, mm, false)
+	r.ListGuestVMs = func(context.Context, *scope.ClusterScope, string, time.Duration) ([]guestVM, error) {
+		return []guestVM{{SystemID: "g1", Name: "guest-1"}}, nil
+	}
+	svc := &fakeReleaseService{releaseErr: errors.New("status: 400: VM hosts must be removed first")}
+
+	res, err := r.releaseMachineWithPolicy(context.Background(), newReleaseMachineScope(mm), nil, svc, &infrav1beta1.Machine{ID: "vm-1"})
+	if err != nil || res.IsZero() {
+		t.Fatalf("blocked: res=%+v err=%v", res, err)
+	}
+	if res.RequeueAfter < 8*time.Minute || res.RequeueAfter > 12*time.Minute {
+		t.Fatalf("RequeueAfter = %s, want 10m ±20%%", res.RequeueAfter)
+	}
+	got := &infrav1beta1.MaasMachine{}
+	_ = r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "vm"}, got)
+	cond := conditions.Get(got, infrav1beta1.ReleaseReadyCondition)
+	if cond == nil || cond.Reason != infrav1beta1.ReleaseBlockedReason {
+		t.Fatalf("condition = %+v", cond)
+	}
+	if !strings.Contains(cond.Message, "guest-1") || !strings.Contains(cond.Message, SkipEvacuationAnnotation) {
+		t.Fatalf("message = %q", cond.Message)
+	}
+}
+
+func TestReleaseGuestVMsSkipEvacuationDeletesAndReleases(t *testing.T) {
+	mm := &infrav1beta1.MaasMachine{ObjectMeta: metav1.ObjectMeta{
+		Name: "vm", Namespace: "default",
+		Annotations: map[string]string{SkipEvacuationAnnotation: "true"},
+	}}
+	r, _ := newReleaseTestReconciler(t, mm, false)
+	var deleted []guestVM
+	r.ListGuestVMs = func(context.Context, *scope.ClusterScope, string, time.Duration) ([]guestVM, error) {
+		return []guestVM{{SystemID: "g1", Name: "guest-1"}}, nil
+	}
+	r.DeleteGuestVMs = func(_ context.Context, _ *scope.ClusterScope, guests []guestVM, _ time.Duration) error {
+		deleted = guests
+		return nil
+	}
+	svc := &fakeReleaseService{releaseErrSeq: []error{errors.New("status: 400: VM hosts must be removed first"), nil}}
+
+	res, err := r.releaseMachineWithPolicy(context.Background(), newReleaseMachineScope(mm), nil, svc, &infrav1beta1.Machine{ID: "vm-1"})
+	if err != nil || res.IsZero() {
+		t.Fatalf("skip release: res=%+v err=%v", res, err)
+	}
+	if len(deleted) != 1 || deleted[0].SystemID != "g1" {
+		t.Fatalf("deleted = %+v", deleted)
+	}
+	if svc.releaseCalls != 2 {
+		t.Fatalf("releaseCalls = %d, want 2", svc.releaseCalls)
+	}
+	if svc.lastOpts.Erase {
+		t.Fatal("skip-evacuation release must not erase")
 	}
 }
 

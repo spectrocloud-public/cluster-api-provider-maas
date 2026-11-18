@@ -68,6 +68,10 @@ type MaasMachineReconciler struct {
 	ReleaseListTimeout   time.Duration
 	ReleaseRetryBudget   time.Duration
 	AutoDeadHostRecovery bool
+
+	// Guest VM hooks are overridable in tests; nil uses the MAAS client.
+	ListGuestVMs   func(context.Context, *scope.ClusterScope, string, time.Duration) ([]guestVM, error)
+	DeleteGuestVMs func(context.Context, *scope.ClusterScope, []guestVM, time.Duration) error
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=maasmachines,verbs=get;list;watch;create;update;patch;delete
@@ -269,11 +273,11 @@ func (r *MaasMachineReconciler) shouldGateFinalizerRemoval(maasMachine *infrav1b
 
 // bestEffortUnregisterLXDHost unregisters the LXD VM host if possible, logging any errors
 func (r *MaasMachineReconciler) bestEffortUnregisterLXDHost(clusterScope *scope.ClusterScope, machineScope *scope.MachineScope, m *infrav1beta1.Machine) {
-	api := clusterScope.GetMaasClientIdentity()
 	hostName := canonicalLXDHostName(m.Hostname)
 	if hostName == "lxd-host-" {
 		return
 	}
+	api := clusterScope.GetMaasClientIdentity()
 	if uerr := lxd.UnregisterLXDHostByNameWithMaasClient(api.Token, api.URL, hostName); uerr != nil {
 		machineScope.Error(uerr, "best-effort unregister of LXD VM host before release failed", "hostName", hostName)
 		return

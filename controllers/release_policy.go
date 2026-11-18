@@ -164,7 +164,7 @@ func (r *MaasMachineReconciler) releaseMachineWithPolicy(
 	}
 
 	if class == releaseClassVMHostRemoval {
-		guests, gerr := listGuestVMs(ctx, clusterScope, m.ID, cfg.ListTimeout)
+		guests, gerr := r.listGuests(ctx, clusterScope, m.ID, cfg.ListTimeout)
 		if gerr != nil {
 			return r.retryRelease(ctx, mm, releaseClassGuestList, gerr)
 		}
@@ -178,7 +178,7 @@ func (r *MaasMachineReconciler) releaseMachineWithPolicy(
 			return ctrl.Result{RequeueAfter: cfg.MaxBackoff}, nil
 		}
 
-		if derr := deleteGuestVMs(ctx, clusterScope, guests, cfg.ListTimeout); derr != nil {
+		if derr := r.deleteGuests(ctx, clusterScope, guests, cfg.ListTimeout); derr != nil {
 			return r.retryRelease(ctx, mm, releaseClassGuestDelete, derr)
 		}
 		r.bestEffortUnregisterLXDHost(clusterScope, machineScope, m)
@@ -515,6 +515,20 @@ func guestNames(guests []guestVM) string {
 		names = append(names, name)
 	}
 	return strings.Join(names, ", ")
+}
+
+func (r *MaasMachineReconciler) listGuests(ctx context.Context, clusterScope *scope.ClusterScope, hostSystemID string, timeout time.Duration) ([]guestVM, error) {
+	if r.ListGuestVMs != nil {
+		return r.ListGuestVMs(ctx, clusterScope, hostSystemID, timeout)
+	}
+	return listGuestVMs(ctx, clusterScope, hostSystemID, timeout)
+}
+
+func (r *MaasMachineReconciler) deleteGuests(ctx context.Context, clusterScope *scope.ClusterScope, guests []guestVM, timeout time.Duration) error {
+	if r.DeleteGuestVMs != nil {
+		return r.DeleteGuestVMs(ctx, clusterScope, guests, timeout)
+	}
+	return deleteGuestVMs(ctx, clusterScope, guests, timeout)
 }
 
 func listGuestVMs(
