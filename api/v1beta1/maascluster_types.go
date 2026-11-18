@@ -46,6 +46,15 @@ type MaasClusterSpec struct {
 	// LXDConfig contains the configuration for LXD hosts
 	// +optional
 	LXDConfig *LXDConfig `json:"lxdConfig,omitempty"`
+
+	// EraseDisksOnRelease requests a MAAS disk erase when a machine is released.
+	// False, the default, keeps the previous release behavior and does not request
+	// a wipe. Set it to true to request the cleanup explicitly. Palette sets this
+	// through the maasCluster key in overrideClusterAPIConfig.
+	// A region with enable_disk_erasing_on_release=true can still erase on its own.
+	// +kubebuilder:default=false
+	// +optional
+	EraseDisksOnRelease bool `json:"eraseDisksOnRelease,omitempty"`
 }
 
 // LXDConfig contains the configuration for LXD hosts

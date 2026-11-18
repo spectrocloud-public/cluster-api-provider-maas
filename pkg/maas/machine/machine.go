@@ -119,17 +119,22 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 	return machine, nil
 }
 
-func (s *Service) ReleaseMachine(systemID string) error {
+func (s *Service) ReleaseMachine(systemID string, eraseDisks bool) error {
 	ctx := context.TODO()
 
-	// Do not request a disk erase. MAAS wipe-disks erases every writable disk the
-	// host can see, including SAN LUNs that are still mapped, and this provider
-	// does not check for those attachments before release. Erase stays off unless
-	// a later change asks for it explicitly.
-	_, err := s.maasClient.Machines().
+	// Erase is off unless MaasCluster.spec.eraseDisksOnRelease is true. MAAS
+	// wipe-disks erases every writable disk the host can see, including SAN LUNs
+	// that are still mapped. Palette sets the field through the maasCluster
+	// passthrough. A region with enable_disk_erasing_on_release=true can still
+	// erase on its own.
+	releaser := s.maasClient.Machines().
 		Machine(systemID).
-		Releaser().
-		Release(ctx)
+		Releaser()
+	if eraseDisks {
+		releaser = releaser.WithErase()
+	}
+	s.scope.Info("Releasing MAAS machine", "systemID", systemID, "eraseRequested", eraseDisks)
+	_, err := releaser.Release(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to release machine")
 	}
