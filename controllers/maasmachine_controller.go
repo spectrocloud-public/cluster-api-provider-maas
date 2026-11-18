@@ -23,13 +23,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spectrocloud/maas-client-go/maasclient"
-	"k8s.io/apimachinery/pkg/runtime"
-
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
@@ -64,6 +62,16 @@ type MaasMachineReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Tracker  clustercache.ClusterCache
+
+	// Release policy (S4). Zero values fall back to maint.DefaultReleaseConfig.
+	ReleaseReadTimeout   time.Duration
+	ReleaseListTimeout   time.Duration
+	ReleaseRetryBudget   time.Duration
+	AutoDeadHostRecovery bool
+
+	// Guest VM hooks are overridable in tests; nil uses the MAAS client.
+	ListGuestVMs   func(context.Context, *scope.ClusterScope, string, time.Duration) ([]guestVM, error)
+	DeleteGuestVMs func(context.Context, *scope.ClusterScope, []guestVM, time.Duration) error
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=maasmachines,verbs=get;list;watch;create;update;patch;delete
@@ -170,7 +178,7 @@ func (r *MaasMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return r.reconcileNormal(ctx, machineScope, clusterScope)
 }
 
-func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope) (ctrl.Result, error) {
+func (r *MaasMachineReconciler) reconcileDelete(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope) (ctrl.Result, error) {
 	machineScope.Info("Reconciling MaasMachine delete")
 
 	maasMachine := machineScope.MaasMachine
@@ -231,12 +239,15 @@ func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope 
 		r.bestEffortUnregisterLXDHost(clusterScope, machineScope, m)
 	}
 
-	if err := r.tryReleaseWithVMHostHandling(context.Background(), machineScope, clusterScope, machineSvc, m); err != nil {
-		return ctrl.Result{}, err
+	if res, err := r.releaseMachineWithPolicy(ctx, machineScope, clusterScope, machineSvc, m); err != nil || !res.IsZero() {
+		return res, err
 	}
 
-	// If this is an LXD VM, delete it after successful release
-	r.maybeDeleteDynamicLXDVM(clusterScope, machineScope, m.ID)
+	// If this is an LXD VM, delete its MAAS record after successful release. A
+	// failed record delete keeps the finalizer and retries.
+	if res, err := r.maybeDeleteDynamicLXDVM(ctx, machineSvc, machineScope, m.ID); err != nil || !res.IsZero() {
+		return res, err
+	}
 
 	// Finalize deletion: mark conditions, event, and remove finalizer
 	r.finalizeMachineDeletion(machineScope, maasMachine, m.ID)
@@ -262,11 +273,11 @@ func (r *MaasMachineReconciler) shouldGateFinalizerRemoval(maasMachine *infrav1b
 
 // bestEffortUnregisterLXDHost unregisters the LXD VM host if possible, logging any errors
 func (r *MaasMachineReconciler) bestEffortUnregisterLXDHost(clusterScope *scope.ClusterScope, machineScope *scope.MachineScope, m *infrav1beta1.Machine) {
-	api := clusterScope.GetMaasClientIdentity()
 	hostName := canonicalLXDHostName(m.Hostname)
 	if hostName == "lxd-host-" {
 		return
 	}
+	api := clusterScope.GetMaasClientIdentity()
 	if uerr := lxd.UnregisterLXDHostByNameWithMaasClient(api.Token, api.URL, hostName); uerr != nil {
 		machineScope.Error(uerr, "best-effort unregister of LXD VM host before release failed", "hostName", hostName)
 		return
@@ -278,82 +289,6 @@ func (r *MaasMachineReconciler) bestEffortUnregisterLXDHost(clusterScope *scope.
 func canonicalLXDHostName(hostname string) string {
 	name := strings.ToLower(strings.TrimSpace(hostname))
 	return fmt.Sprintf("lxd-host-%s", name)
-}
-
-// tryReleaseWithVMHostHandling releases the machine, handling VM host dependencies when required
-func (r *MaasMachineReconciler) tryReleaseWithVMHostHandling(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope, machineSvc *maasmachine.Service, m *infrav1beta1.Machine) error {
-	if err := machineSvc.ReleaseMachine(m.ID); err != nil {
-		// If MAAS requires VM host removal first, attempt best-effort unregister and retry once
-		if isVMHostRemovalRequiredError(err) {
-			api := clusterScope.GetMaasClientIdentity()
-
-			// For control-plane BM that backs an LXD VM host, force-delete guest VMs to unblock release
-			if clusterScope.IsLXDHostEnabled() && machineScope.IsControlPlane() {
-				r.forceDeleteGuestVMsIfControlPlane(ctx, clusterScope, machineScope, m.ID)
-			}
-
-			// Unregister by canonical name lxd-host-<hostname>
-			hostName := canonicalLXDHostName(m.Hostname)
-			if hostName == "lxd-host-" {
-				return err
-			}
-			if uerr := lxd.UnregisterLXDHostByNameWithMaasClient(api.Token, api.URL, hostName); uerr != nil {
-				machineScope.Error(uerr, "failed to unregister LXD VM host prior to release")
-				return err
-			}
-			machineScope.Info("Unregistered LXD VM host prior to release", "hostName", hostName)
-			// retry release
-			if rerr := machineSvc.ReleaseMachine(m.ID); rerr != nil {
-				machineScope.Error(rerr, "failed to release machine after unregistering VM host")
-				return rerr
-			}
-			return nil
-		}
-		machineScope.Error(err, "failed to release machine")
-		return err
-	}
-	return nil
-}
-
-// forceDeleteGuestVMsIfControlPlane removes guest VMs from a VM host backed by this control-plane machine
-func (r *MaasMachineReconciler) forceDeleteGuestVMsIfControlPlane(ctx context.Context, clusterScope *scope.ClusterScope, machineScope *scope.MachineScope, hostSystemID string) {
-	api := clusterScope.GetMaasClientIdentity()
-	client := maasclient.NewAuthenticatedClientSet(api.URL, api.Token)
-	if hosts, herr := client.VMHosts().List(ctx, nil); herr == nil {
-		for _, h := range hosts {
-			if h.HostSystemID() == hostSystemID {
-				if guests, gerr := h.Machines().List(ctx); gerr == nil {
-					for _, g := range guests {
-						gid := g.SystemID()
-						if gid == "" {
-							continue
-						}
-						// Fetch details to confirm and delete
-						if gm, ge := client.Machines().Machine(gid).Get(ctx); ge == nil {
-							if derr := client.Machines().Machine(gm.SystemID()).Delete(ctx); derr != nil {
-								machineScope.Error(derr, "failed to delete guest VM during host release cleanup", "guestSystemID", gm.SystemID())
-							}
-						}
-					}
-				}
-				break
-			}
-		}
-	}
-}
-
-// maybeDeleteDynamicLXDVM deletes the LXD VM if the MaasMachine was dynamically created
-func (r *MaasMachineReconciler) maybeDeleteDynamicLXDVM(clusterScope *scope.ClusterScope, machineScope *scope.MachineScope, systemID string) {
-	if !machineScope.GetDynamicLXD() {
-		return
-	}
-	machineScope.Info("Deleting LXD VM after release", "system-id", systemID)
-	api := clusterScope.GetMaasClientIdentity()
-	if uerr := lxd.DeleteLXDVMWithMaasClient(api.Token, api.URL, systemID); uerr != nil {
-		machineScope.Error(uerr, "failed to delete LXD VM after release", "system-id", systemID)
-		return
-	}
-	machineScope.Info("Successfully deleted LXD VM after release", "system-id", systemID)
 }
 
 // finalizeMachineDeletion marks conditions, records event, and removes the finalizer

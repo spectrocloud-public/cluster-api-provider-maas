@@ -61,6 +61,11 @@ var (
 	webhookPort          int
 	watchNamespace       string
 	clusterRole          string
+
+	releaseReadTimeout   time.Duration
+	releaseListTimeout   time.Duration
+	releaseRetryBudget   time.Duration
+	autoDeadHostRecovery bool
 )
 
 const (
@@ -175,10 +180,14 @@ func main() {
 		}
 
 		if err := (&controllers.MaasMachineReconciler{
-			Client:   mgr.GetClient(),
-			Log:      ctrl.Log.WithName("controllers").WithName("MaasMachine"),
-			Recorder: mgr.GetEventRecorderFor("maasmachine-controller"),
-			Tracker:  clusterCache,
+			Client:               mgr.GetClient(),
+			Log:                  ctrl.Log.WithName("controllers").WithName("MaasMachine"),
+			Recorder:             mgr.GetEventRecorderFor("maasmachine-controller"),
+			Tracker:              clusterCache,
+			ReleaseReadTimeout:   releaseReadTimeout,
+			ReleaseListTimeout:   releaseListTimeout,
+			ReleaseRetryBudget:   releaseRetryBudget,
+			AutoDeadHostRecovery: autoDeadHostRecovery,
 		}).SetupWithManager(ctx, mgr, concurrency(machineConcurrency)); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "MaasMachine")
 			os.Exit(1)
@@ -266,6 +275,14 @@ func initFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&clusterRole, "cluster-role", "",
 		"Role of this cluster: 'hcp' (Host Control Plane) or 'wlc' (Workload Cluster). When set to 'wlc', enables VM evacuation controller.",
 	)
+	fs.DurationVar(&releaseReadTimeout, "maas-read-timeout", 60*time.Second,
+		"Timeout for MAAS read calls such as GetMachineState.")
+	fs.DurationVar(&releaseListTimeout, "maas-list-timeout", 2*time.Minute,
+		"Timeout for MAAS list/delete calls and the release submit.")
+	fs.DurationVar(&releaseRetryBudget, "release-retry-budget", 30*time.Minute,
+		"After this, release moves to severity Error and emits ReleaseStuck once.")
+	fs.BoolVar(&autoDeadHostRecovery, "auto-dead-host-recovery", true,
+		"Allow the release path to delete a VM's MAAS record when its parent host is marked host-dead.")
 
 	feature.MutableGates.AddFlag(fs)
 }
