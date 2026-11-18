@@ -108,6 +108,9 @@ const (
 	// ReleaseFailedReason means release returned a retryable error.
 	ReleaseFailedReason = "ReleaseFailed"
 
+	// ReleaseInProgressReason means release was submitted and is being polled.
+	ReleaseInProgressReason = "ReleaseInProgress"
+
 	// ReleaseBlockedReason means release needs operator action (guest VMs present).
 	ReleaseBlockedReason = "ReleaseBlocked"
 

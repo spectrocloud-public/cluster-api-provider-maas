@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -46,8 +48,11 @@ type fakeReleaseService struct {
 	releaseErr error
 	recordErr  error
 	dynamicErr error
+	state      infrav1beta1.MachineState
+	stateErr   error
 
 	releaseCalled bool
+	releaseCalls  int
 	recordCalled  bool
 	dynamicCalled bool
 	lastOpts      maasmachine.ReleaseOptions
@@ -57,8 +62,13 @@ func (f *fakeReleaseService) ParentHostTags(context.Context, string, time.Durati
 	return f.parentID, f.parentTags, f.parentErr
 }
 
+func (f *fakeReleaseService) GetMachineState(context.Context, string, time.Duration) (infrav1beta1.MachineState, error) {
+	return f.state, f.stateErr
+}
+
 func (f *fakeReleaseService) ReleaseMachine(_ context.Context, _ string, opts maasmachine.ReleaseOptions) error {
 	f.releaseCalled = true
+	f.releaseCalls++
 	f.lastOpts = opts
 	return f.releaseErr
 }
@@ -98,20 +108,20 @@ func TestClassifyReleaseError(t *testing.T) {
 
 func TestReleaseBackoff(t *testing.T) {
 	cfg := maint.ReleaseConfig{
-		InitialBackoff: 30 * time.Second,
-		MaxBackoff:     5 * time.Minute,
-		RetryBudget:    15 * time.Minute,
+		InitialBackoff: time.Minute,
+		MaxBackoff:     10 * time.Minute,
+		RetryBudget:    30 * time.Minute,
 	}
 	tests := []struct {
 		count int
 		want  time.Duration
 	}{
-		{count: 1, want: 30 * time.Second},
-		{count: 2, want: time.Minute},
-		{count: 3, want: 2 * time.Minute},
-		{count: 4, want: 4 * time.Minute},
-		{count: 5, want: 5 * time.Minute},
-		{count: 20, want: 5 * time.Minute},
+		{count: 1, want: time.Minute},
+		{count: 2, want: 2 * time.Minute},
+		{count: 3, want: 4 * time.Minute},
+		{count: 4, want: 8 * time.Minute},
+		{count: 5, want: 10 * time.Minute},
+		{count: 20, want: 10 * time.Minute},
 	}
 	for _, tt := range tests {
 		got := releaseBackoff(releaseAttempts{Count: tt.count}, cfg)
@@ -120,12 +130,13 @@ func TestReleaseBackoff(t *testing.T) {
 		}
 	}
 
-	expired := releaseAttempts{
-		Count:        1,
-		FirstFailure: time.Now().Add(-20 * time.Minute).UTC().Format(time.RFC3339),
+	expired := releaseAttempts{Count: 1, SubmitTime: time.Now().Add(-31 * time.Minute).UTC().Format(time.RFC3339)}
+	if !releaseOverBudget(expired, cfg) {
+		t.Error("31m-old submit should be over the 30m budget")
 	}
-	if got := releaseBackoff(expired, cfg); got != cfg.MaxBackoff {
-		t.Errorf("releaseBackoff after budget = %s, want %s", got, cfg.MaxBackoff)
+	fresh := releaseAttempts{Count: 1, SubmitTime: time.Now().UTC().Format(time.RFC3339)}
+	if releaseOverBudget(fresh, cfg) {
+		t.Error("fresh submit should not be over budget")
 	}
 }
 
@@ -294,8 +305,8 @@ func TestReleaseMachineWithPolicyServerErrorRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if res.RequeueAfter != 30*time.Second {
-		t.Fatalf("RequeueAfter = %s, want 30s", res.RequeueAfter)
+	if res.RequeueAfter < 48*time.Second || res.RequeueAfter > 72*time.Second {
+		t.Fatalf("RequeueAfter = %s, want 1m ±20%%", res.RequeueAfter)
 	}
 	got := &infrav1beta1.MaasMachine{}
 	_ = r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "vm"}, got)
@@ -320,12 +331,114 @@ func TestReleaseMachineEraseSelection(t *testing.T) {
 		t.Error("normal release should erase")
 	}
 
+	mm2 := &infrav1beta1.MaasMachine{ObjectMeta: metav1.ObjectMeta{Name: "vm2", Namespace: "default"}}
+	r2, _ := newReleaseTestReconciler(t, mm2, false)
 	dead := &fakeReleaseService{parentTags: []string{maint.TagHostDead}}
-	if _, err := r.releaseMachineWithPolicy(context.Background(), newReleaseMachineScope(mm), nil, dead, &infrav1beta1.Machine{ID: "vm-1"}); err != nil {
+	if _, err := r2.releaseMachineWithPolicy(context.Background(), newReleaseMachineScope(mm2), nil, dead, &infrav1beta1.Machine{ID: "vm-2"}); err != nil {
 		t.Fatalf("dead-parent release: %v", err)
 	}
 	if dead.lastOpts.Erase {
 		t.Error("host-dead release must not erase when the flag is off")
+	}
+}
+
+func TestReleasePollingDoesNotResubmit(t *testing.T) {
+	mm := &infrav1beta1.MaasMachine{ObjectMeta: metav1.ObjectMeta{Name: "vm", Namespace: "default"}}
+	r, _ := newReleaseTestReconciler(t, mm, false)
+	svc := &fakeReleaseService{state: infrav1beta1.MachineStateReleasing}
+	ctx := context.Background()
+	ms := newReleaseMachineScope(mm)
+
+	res, err := r.releaseMachineWithPolicy(ctx, ms, nil, svc, &infrav1beta1.Machine{ID: "vm-1"})
+	if err != nil || res.IsZero() {
+		t.Fatalf("submit: res=%+v err=%v", res, err)
+	}
+	if !svc.releaseCalled {
+		t.Fatal("expected release submit")
+	}
+	got := &infrav1beta1.MaasMachine{}
+	_ = r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "vm"}, got)
+	if cond := conditions.Get(got, infrav1beta1.ReleaseReadyCondition); cond == nil || cond.Reason != infrav1beta1.ReleaseInProgressReason {
+		t.Fatalf("condition = %+v", cond)
+	}
+
+	res, err = r.releaseMachineWithPolicy(ctx, ms, nil, svc, &infrav1beta1.Machine{ID: "vm-1"})
+	if err != nil || res.IsZero() {
+		t.Fatalf("poll Releasing: res=%+v err=%v", res, err)
+	}
+	if !svc.releaseCalled {
+		t.Fatal("release should have been called once")
+	}
+	calls := svc.releaseCalls
+	svc.state = infrav1beta1.MachineStateReady
+	res, err = r.releaseMachineWithPolicy(ctx, ms, nil, svc, &infrav1beta1.Machine{ID: "vm-1"})
+	if err != nil || !res.IsZero() {
+		t.Fatalf("poll Ready: res=%+v err=%v", res, err)
+	}
+	if svc.releaseCalls != calls {
+		t.Fatalf("release resubmitted while polling: %d -> %d", calls, svc.releaseCalls)
+	}
+	got = &infrav1beta1.MaasMachine{}
+	_ = r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "vm"}, got)
+	if cond := conditions.Get(got, infrav1beta1.ReleaseReadyCondition); cond == nil || cond.Status != corev1.ConditionTrue {
+		t.Fatalf("condition = %+v", cond)
+	}
+}
+
+func TestReleaseFailedReleasingRetries(t *testing.T) {
+	mm := &infrav1beta1.MaasMachine{ObjectMeta: metav1.ObjectMeta{Name: "vm", Namespace: "default"}}
+	r, _ := newReleaseTestReconciler(t, mm, false)
+	svc := &fakeReleaseService{state: infrav1beta1.MachineStateReleasing}
+	ctx := context.Background()
+	ms := newReleaseMachineScope(mm)
+
+	if _, err := r.releaseMachineWithPolicy(ctx, ms, nil, svc, &infrav1beta1.Machine{ID: "vm-1"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	svc.state = infrav1beta1.MachineStateFailedReleasing
+	res, err := r.releaseMachineWithPolicy(ctx, ms, nil, svc, &infrav1beta1.Machine{ID: "vm-1"})
+	if err != nil || res.IsZero() {
+		t.Fatalf("failed releasing: res=%+v err=%v", res, err)
+	}
+	if _, err := r.releaseMachineWithPolicy(ctx, ms, nil, svc, &infrav1beta1.Machine{ID: "vm-1"}); err != nil {
+		t.Fatalf("resubmit: %v", err)
+	}
+	if svc.releaseCalls != 2 {
+		t.Fatalf("releaseCalls = %d, want 2", svc.releaseCalls)
+	}
+}
+
+func TestReleaseStuckAfterBudget(t *testing.T) {
+	mm := &infrav1beta1.MaasMachine{ObjectMeta: metav1.ObjectMeta{
+		Name: "vm", Namespace: "default",
+		Annotations: map[string]string{
+			ReleaseAttemptsAnnotation: fmt.Sprintf(`{"class":"submitted","count":1,"submitted":true,"submitTime":%q,"parentHost":"host-1"}`, time.Now().Add(-31*time.Minute).UTC().Format(time.RFC3339)),
+		},
+	}}
+	r, _ := newReleaseTestReconciler(t, mm, false)
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	svc := &fakeReleaseService{state: infrav1beta1.MachineStateDeployed}
+
+	res, err := r.releaseMachineWithPolicy(context.Background(), newReleaseMachineScope(mm), nil, svc, &infrav1beta1.Machine{ID: "vm-1"})
+	if err != nil || res.IsZero() {
+		t.Fatalf("stuck: res=%+v err=%v", res, err)
+	}
+	got := &infrav1beta1.MaasMachine{}
+	_ = r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "vm"}, got)
+	cond := conditions.Get(got, infrav1beta1.ReleaseReadyCondition)
+	if cond == nil || cond.Status != corev1.ConditionFalse || cond.Severity != clusterv1.ConditionSeverityError {
+		t.Fatalf("condition = %+v", cond)
+	}
+	if len(events.Events) != 1 {
+		t.Fatalf("ReleaseStuck events = %d, want 1", len(events.Events))
+	}
+
+	if _, err := r.releaseMachineWithPolicy(context.Background(), newReleaseMachineScope(mm), nil, svc, &infrav1beta1.Machine{ID: "vm-1"}); err != nil {
+		t.Fatalf("second poll: %v", err)
+	}
+	if len(events.Events) != 1 {
+		t.Fatalf("ReleaseStuck emitted again: %d events", len(events.Events))
 	}
 }
 

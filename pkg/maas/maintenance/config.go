@@ -57,21 +57,26 @@ type VECConfig struct {
 	CheckAPIPath string
 }
 
-// ReleaseConfig configures VM release retries and per-call timeouts.
+// ReleaseConfig configures VM release retries and per-kind timeouts.
 type ReleaseConfig struct {
-	CallTimeout    time.Duration
+	ReadTimeout    time.Duration
+	ListTimeout    time.Duration
 	RetryBudget    time.Duration
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+	Jitter         float64
 }
 
-// DefaultReleaseConfig returns the S4 defaults.
+// DefaultReleaseConfig returns the S4/D18 defaults, sized for a MAAS region
+// with 1000+ machines.
 func DefaultReleaseConfig() ReleaseConfig {
 	return ReleaseConfig{
-		CallTimeout:    3 * time.Minute,
-		RetryBudget:    15 * time.Minute,
-		InitialBackoff: 30 * time.Second,
-		MaxBackoff:     5 * time.Minute,
+		ReadTimeout:    60 * time.Second,
+		ListTimeout:    2 * time.Minute,
+		RetryBudget:    30 * time.Minute,
+		InitialBackoff: time.Minute,
+		MaxBackoff:     10 * time.Minute,
+		Jitter:         0.2,
 	}
 }
 

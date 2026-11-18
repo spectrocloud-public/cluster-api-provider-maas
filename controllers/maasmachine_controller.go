@@ -64,7 +64,8 @@ type MaasMachineReconciler struct {
 	Tracker  clustercache.ClusterCache
 
 	// Release policy (S4). Zero values fall back to maint.DefaultReleaseConfig.
-	ReleaseCallTimeout   time.Duration
+	ReleaseReadTimeout   time.Duration
+	ReleaseListTimeout   time.Duration
 	ReleaseRetryBudget   time.Duration
 	AutoDeadHostRecovery bool
 }

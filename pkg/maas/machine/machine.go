@@ -127,6 +127,20 @@ type ReleaseOptions struct {
 	Timeout time.Duration
 }
 
+// GetMachineState reads the current MAAS state for a machine.
+func (s *Service) GetMachineState(ctx context.Context, systemID string, timeout time.Duration) (infrav1beta1.MachineState, error) {
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	m, err := s.maasClient.Machines().Machine(systemID).Get(cctx)
+	if err != nil {
+		return "", err
+	}
+	return infrav1beta1.MachineState(m.State()), nil
+}
+
 func (s *Service) ReleaseMachine(ctx context.Context, systemID string, opts ReleaseOptions) error {
 	timeout := opts.Timeout
 	if timeout <= 0 {

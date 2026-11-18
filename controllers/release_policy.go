@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -37,31 +38,39 @@ import (
 )
 
 const (
-	// ReleaseAttemptsAnnotation records the last release error class, count and
-	// first-failure time as JSON.
+	// ReleaseAttemptsAnnotation records the last release error class, count,
+	// first-failure time, submit time and parent host as JSON.
 	ReleaseAttemptsAnnotation = "maas.lxd.io/release-attempts"
 	// SkipEvacuationAnnotation is the audited replacement for removing the
 	// evacuation finalizer by hand.
 	SkipEvacuationAnnotation = "maas.lxd.io/skip-evacuation"
+	// ReleaseStuckEvent is emitted once when the retry budget is exhausted.
+	ReleaseStuckEvent = "ReleaseStuck"
 )
 
 const (
-	releaseClassNotFound      = "not-found"
-	releaseClassVMHostRemoval = "vm-host-removal"
-	releaseClassTimeout       = "timeout"
-	releaseClassServerError   = "server-error"
-	releaseClassConflict      = "conflict"
-	releaseClassVMDelete      = "vm-delete"
-	releaseClassParentTags    = "parent-tags"
-	releaseClassGuestList     = "guest-list"
-	releaseClassGuestDelete   = "guest-delete"
-	releaseClassUnknown       = "unknown"
+	releaseClassNotFound        = "not-found"
+	releaseClassVMHostRemoval   = "vm-host-removal"
+	releaseClassTimeout         = "timeout"
+	releaseClassServerError     = "server-error"
+	releaseClassConflict        = "conflict"
+	releaseClassVMDelete        = "vm-delete"
+	releaseClassParentTags      = "parent-tags"
+	releaseClassGuestList       = "guest-list"
+	releaseClassGuestDelete     = "guest-delete"
+	releaseClassFailedReleasing = "failed-releasing"
+	releaseClassSubmitted       = "submitted"
+	releaseClassUnknown         = "unknown"
 )
 
 type releaseAttempts struct {
-	Class        string `json:"class,omitempty"`
-	Count        int    `json:"count"`
-	FirstFailure string `json:"firstFailure,omitempty"`
+	Class         string `json:"class,omitempty"`
+	Count         int    `json:"count"`
+	FirstFailure  string `json:"firstFailure,omitempty"`
+	Submitted     bool   `json:"submitted,omitempty"`
+	SubmitTime    string `json:"submitTime,omitempty"`
+	ParentHost    string `json:"parentHost,omitempty"`
+	StuckNotified bool   `json:"stuckNotified,omitempty"`
 }
 
 type guestVM struct {
@@ -69,10 +78,9 @@ type guestVM struct {
 	Name     string
 }
 
-// releaseService is the subset of maasmachine.Service used by the S4 release
-// path; it is an interface so the policy can be unit-tested.
 type releaseService interface {
 	ParentHostTags(ctx context.Context, systemID string, timeout time.Duration) (string, []string, error)
+	GetMachineState(ctx context.Context, systemID string, timeout time.Duration) (infrav1beta1.MachineState, error)
 	ReleaseMachine(ctx context.Context, systemID string, opts maasmachine.ReleaseOptions) error
 	DeleteMachineRecord(ctx context.Context, systemID string, timeout time.Duration) error
 	DeleteDynamicLXDVM(ctx context.Context, systemID string, timeout time.Duration) error
@@ -80,8 +88,11 @@ type releaseService interface {
 
 func (r *MaasMachineReconciler) releaseConfig() maint.ReleaseConfig {
 	cfg := maint.DefaultReleaseConfig()
-	if r.ReleaseCallTimeout > 0 {
-		cfg.CallTimeout = r.ReleaseCallTimeout
+	if r.ReleaseReadTimeout > 0 {
+		cfg.ReadTimeout = r.ReleaseReadTimeout
+	}
+	if r.ReleaseListTimeout > 0 {
+		cfg.ListTimeout = r.ReleaseListTimeout
 	}
 	if r.ReleaseRetryBudget > 0 {
 		cfg.RetryBudget = r.ReleaseRetryBudget
@@ -89,8 +100,8 @@ func (r *MaasMachineReconciler) releaseConfig() maint.ReleaseConfig {
 	return cfg
 }
 
-// releaseMachineWithPolicy is the S4 release path: parent-dead short circuit,
-// timeout, error classes, backoff, and guest-delete gating.
+// releaseMachineWithPolicy implements D18: per-kind timeouts, one release
+// submit followed by state polling, jittered retries and a stuck alert.
 func (r *MaasMachineReconciler) releaseMachineWithPolicy(
 	ctx context.Context,
 	machineScope *scope.MachineScope,
@@ -101,51 +112,59 @@ func (r *MaasMachineReconciler) releaseMachineWithPolicy(
 	mm := machineScope.MaasMachine
 	cfg := r.releaseConfig()
 	skip := hasAnnotation(mm, SkipEvacuationAnnotation)
+	state := r.loadReleaseAttempts(mm)
 
-	parentID, tags, pgErr := machineSvc.ParentHostTags(ctx, m.ID, cfg.CallTimeout)
+	// Once submitted, poll instead of releasing again.
+	if state.Submitted {
+		return r.pollRelease(ctx, machineSvc, machineScope, m, cfg, state)
+	}
+
+	parentID, tags, pgErr := machineSvc.ParentHostTags(ctx, m.ID, cfg.ReadTimeout)
 	if pgErr != nil {
+		if classifyReleaseError(pgErr) == releaseClassTimeout {
+			return ctrl.Result{RequeueAfter: cfg.InitialBackoff}, nil
+		}
 		return r.retryRelease(ctx, mm, releaseClassParentTags, pgErr)
 	}
 	deadParent := hasTag(tags, maint.TagHostDead)
 
 	if deadParent && r.AutoDeadHostRecovery {
-		if err := machineSvc.DeleteMachineRecord(ctx, m.ID, cfg.CallTimeout); err != nil {
+		if err := machineSvc.DeleteMachineRecord(ctx, m.ID, cfg.ListTimeout); err != nil {
 			if isNotFoundError(err) {
-				r.clearReleaseAttempts(ctx, mm)
-				r.setReleaseReady(ctx, mm, corev1.ConditionTrue, infrav1beta1.ReleaseCompleteReason,
-					clusterv1.ConditionSeverityNone, "MAAS record already gone")
+				r.releaseComplete(ctx, mm, "MAAS record already gone")
 				return ctrl.Result{}, nil
 			}
 			return r.retryRelease(ctx, mm, releaseClassVMDelete, err)
 		}
-		r.clearReleaseAttempts(ctx, mm)
-		r.setReleaseReady(ctx, mm, corev1.ConditionTrue, infrav1beta1.ReleaseCompleteReason,
-			clusterv1.ConditionSeverityNone,
-			fmt.Sprintf("deleted MAAS record for host-dead parent %s; no release or erase", parentID))
+		r.releaseComplete(ctx, mm, fmt.Sprintf("deleted MAAS record for host-dead parent %s; no release or erase", parentID))
 		machineScope.Info("Deleted MAAS record for VM on host-dead parent", "system-id", m.ID, "parent", parentID)
 		return ctrl.Result{}, nil
 	}
 
 	// Normal release keeps erase; a host-dead parent or skip-evacuation does not.
 	erase := !deadParent && !skip
-	err := machineSvc.ReleaseMachine(ctx, m.ID, maasmachine.ReleaseOptions{Erase: erase, Timeout: cfg.CallTimeout})
+	err := machineSvc.ReleaseMachine(ctx, m.ID, maasmachine.ReleaseOptions{Erase: erase, Timeout: cfg.ListTimeout})
 	if err == nil {
-		r.clearReleaseAttempts(ctx, mm)
-		r.setReleaseReady(ctx, mm, corev1.ConditionTrue, infrav1beta1.ReleaseCompleteReason,
-			clusterv1.ConditionSeverityNone, "machine released")
-		return ctrl.Result{}, nil
+		state = r.markReleaseSubmitted(ctx, mm, releaseClassSubmitted, parentID)
+		r.setReleaseInProgress(ctx, mm, state, "release submitted; polling MAAS state")
+		return ctrl.Result{RequeueAfter: cfg.InitialBackoff}, nil
 	}
 
 	class := classifyReleaseError(err)
 	if class == releaseClassNotFound {
-		r.clearReleaseAttempts(ctx, mm)
-		r.setReleaseReady(ctx, mm, corev1.ConditionTrue, infrav1beta1.ReleaseCompleteReason,
-			clusterv1.ConditionSeverityNone, "MAAS record already gone")
+		r.releaseComplete(ctx, mm, "MAAS record already gone")
 		return ctrl.Result{}, nil
 	}
 
+	if class == releaseClassTimeout {
+		// MAAS may have accepted the release. Do not submit again; poll.
+		state = r.markReleaseSubmitted(ctx, mm, releaseClassTimeout, parentID)
+		r.setReleaseInProgress(ctx, mm, state, "release submit timed out; polling MAAS state")
+		return ctrl.Result{RequeueAfter: cfg.InitialBackoff}, nil
+	}
+
 	if class == releaseClassVMHostRemoval {
-		guests, gerr := listGuestVMs(ctx, clusterScope, m.ID, cfg.CallTimeout)
+		guests, gerr := listGuestVMs(ctx, clusterScope, m.ID, cfg.ListTimeout)
 		if gerr != nil {
 			return r.retryRelease(ctx, mm, releaseClassGuestList, gerr)
 		}
@@ -159,20 +178,134 @@ func (r *MaasMachineReconciler) releaseMachineWithPolicy(
 			return ctrl.Result{RequeueAfter: cfg.MaxBackoff}, nil
 		}
 
-		if derr := deleteGuestVMs(ctx, clusterScope, guests, cfg.CallTimeout); derr != nil {
+		if derr := deleteGuestVMs(ctx, clusterScope, guests, cfg.ListTimeout); derr != nil {
 			return r.retryRelease(ctx, mm, releaseClassGuestDelete, derr)
 		}
 		r.bestEffortUnregisterLXDHost(clusterScope, machineScope, m)
-		if rerr := machineSvc.ReleaseMachine(ctx, m.ID, maasmachine.ReleaseOptions{Erase: false, Timeout: cfg.CallTimeout}); rerr != nil {
+		if rerr := machineSvc.ReleaseMachine(ctx, m.ID, maasmachine.ReleaseOptions{Erase: false, Timeout: cfg.ListTimeout}); rerr != nil {
 			return r.retryRelease(ctx, mm, classifyReleaseError(rerr), rerr)
 		}
-		r.clearReleaseAttempts(ctx, mm)
-		r.setReleaseReady(ctx, mm, corev1.ConditionTrue, infrav1beta1.ReleaseCompleteReason,
-			clusterv1.ConditionSeverityNone, "machine released after skip-evacuation guest cleanup")
-		return ctrl.Result{}, nil
+		state = r.markReleaseSubmitted(ctx, mm, releaseClassSubmitted, parentID)
+		r.setReleaseInProgress(ctx, mm, state, "release submitted after skip-evacuation guest cleanup")
+		return ctrl.Result{RequeueAfter: cfg.InitialBackoff}, nil
 	}
 
 	return r.retryRelease(ctx, mm, class, err)
+}
+
+// pollRelease reads MAAS state; it never submits another release.
+func (r *MaasMachineReconciler) pollRelease(
+	ctx context.Context,
+	machineSvc releaseService,
+	machineScope *scope.MachineScope,
+	m *infrav1beta1.Machine,
+	cfg maint.ReleaseConfig,
+	state releaseAttempts,
+) (ctrl.Result, error) {
+	mm := machineScope.MaasMachine
+	st, err := machineSvc.GetMachineState(ctx, m.ID, cfg.ReadTimeout)
+	if err != nil {
+		if isNotFoundError(err) {
+			r.releaseComplete(ctx, mm, "MAAS record already gone")
+			return ctrl.Result{}, nil
+		}
+		if classifyReleaseError(err) == releaseClassTimeout {
+			return ctrl.Result{RequeueAfter: cfg.InitialBackoff}, nil
+		}
+		return r.retryRelease(ctx, mm, releaseClassUnknown, err)
+	}
+
+	switch st {
+	case infrav1beta1.MachineStateReady:
+		r.releaseComplete(ctx, mm, "machine released")
+		return ctrl.Result{}, nil
+	case infrav1beta1.MachineStateReleasing, infrav1beta1.MachineStateDiskErasing:
+		r.reportReleaseStuckIfNeeded(ctx, mm, &state, cfg)
+		r.setReleaseInProgress(ctx, mm, state, fmt.Sprintf("release in progress (state=%s)", st))
+		return ctrl.Result{RequeueAfter: cfg.InitialBackoff}, nil
+	case infrav1beta1.MachineStateFailedReleasing:
+		state.Submitted = false
+		r.saveReleaseAttempts(ctx, mm, state)
+		return r.retryRelease(ctx, mm, releaseClassFailedReleasing, fmt.Errorf("MAAS reported state %q", st))
+	default:
+		// Deployed/Allocated after submit: wait, but do not resubmit.
+		if r.reportReleaseStuckIfNeeded(ctx, mm, &state, cfg) {
+			return ctrl.Result{RequeueAfter: cfg.MaxBackoff}, nil
+		}
+		r.setReleaseInProgress(ctx, mm, state, fmt.Sprintf("waiting for MAAS release (state=%s)", st))
+		return ctrl.Result{RequeueAfter: cfg.InitialBackoff}, nil
+	}
+}
+
+func (r *MaasMachineReconciler) retryRelease(
+	ctx context.Context,
+	mm *infrav1beta1.MaasMachine,
+	class string,
+	cause error,
+) (ctrl.Result, error) {
+	state := r.recordReleaseAttempt(ctx, mm, class)
+	cfg := r.releaseConfig()
+	d := releaseBackoff(state, cfg)
+	if r.reportReleaseStuckIfNeeded(ctx, mm, &state, cfg) {
+		d = cfg.MaxBackoff
+	} else {
+		r.setReleaseReady(ctx, mm, corev1.ConditionFalse, infrav1beta1.ReleaseFailedReason,
+			clusterv1.ConditionSeverityWarning,
+			fmt.Sprintf("release failed (%s, attempt %d, first failure %s): %v",
+				class, state.Count, state.FirstFailure, cause))
+	}
+	return ctrl.Result{RequeueAfter: d}, nil
+}
+
+func (r *MaasMachineReconciler) reportReleaseStuckIfNeeded(
+	ctx context.Context,
+	mm *infrav1beta1.MaasMachine,
+	state *releaseAttempts,
+	cfg maint.ReleaseConfig,
+) bool {
+	if !releaseOverBudget(*state, cfg) {
+		return false
+	}
+	if !state.StuckNotified {
+		state.StuckNotified = true
+		r.saveReleaseAttempts(ctx, mm, *state)
+		r.setReleaseReady(ctx, mm, corev1.ConditionFalse, infrav1beta1.ReleaseFailedReason,
+			clusterv1.ConditionSeverityError,
+			fmt.Sprintf("release stuck after %s (class=%s, attempts=%d, first failure %s, submit %s, parent %s)",
+				cfg.RetryBudget, state.Class, state.Count, state.FirstFailure, state.SubmitTime, state.ParentHost))
+		if r.Recorder != nil {
+			r.Recorder.Eventf(mm, corev1.EventTypeWarning, ReleaseStuckEvent,
+				"Release stuck after %s (class=%s, attempts=%d)", cfg.RetryBudget, state.Class, state.Count)
+		}
+	}
+	return true
+}
+
+func releaseOverBudget(state releaseAttempts, cfg maint.ReleaseConfig) bool {
+	ref := state.SubmitTime
+	if ref == "" {
+		ref = state.FirstFailure
+	}
+	if ref == "" || cfg.RetryBudget <= 0 {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, ref)
+	if err != nil {
+		return false
+	}
+	return time.Since(t) >= cfg.RetryBudget
+}
+
+func (r *MaasMachineReconciler) releaseComplete(ctx context.Context, mm *infrav1beta1.MaasMachine, message string) {
+	r.clearReleaseAttempts(ctx, mm)
+	r.setReleaseReady(ctx, mm, corev1.ConditionTrue, infrav1beta1.ReleaseCompleteReason,
+		clusterv1.ConditionSeverityNone, message)
+}
+
+func (r *MaasMachineReconciler) setReleaseInProgress(ctx context.Context, mm *infrav1beta1.MaasMachine, state releaseAttempts, message string) {
+	r.setReleaseReady(ctx, mm, corev1.ConditionFalse, infrav1beta1.ReleaseInProgressReason,
+		clusterv1.ConditionSeverityInfo,
+		fmt.Sprintf("%s (class=%s, submit %s, parent %s)", message, state.Class, state.SubmitTime, state.ParentHost))
 }
 
 // maybeDeleteDynamicLXDVM deletes the MAAS record for a dynamic LXD VM and
@@ -188,7 +321,7 @@ func (r *MaasMachineReconciler) maybeDeleteDynamicLXDVM(
 	}
 	cfg := r.releaseConfig()
 	machineScope.Info("Deleting LXD VM after release", "system-id", systemID)
-	if err := machineSvc.DeleteDynamicLXDVM(ctx, systemID, cfg.CallTimeout); err != nil {
+	if err := machineSvc.DeleteDynamicLXDVM(ctx, systemID, cfg.ListTimeout); err != nil {
 		if isNotFoundError(err) {
 			return ctrl.Result{}, nil
 		}
@@ -205,41 +338,21 @@ func (r *MaasMachineReconciler) maybeDeleteDynamicLXDVM(
 	return ctrl.Result{}, nil
 }
 
-func (r *MaasMachineReconciler) retryRelease(
-	ctx context.Context,
-	mm *infrav1beta1.MaasMachine,
-	class string,
-	cause error,
-) (ctrl.Result, error) {
-	state := r.recordReleaseAttempt(ctx, mm, class)
-	r.setReleaseReady(ctx, mm, corev1.ConditionFalse, infrav1beta1.ReleaseFailedReason,
-		clusterv1.ConditionSeverityWarning,
-		fmt.Sprintf("release failed (%s, attempt %d, first failure %s): %v",
-			class, state.Count, state.FirstFailure, cause))
-	return ctrl.Result{RequeueAfter: releaseBackoff(state, r.releaseConfig())}, nil
-}
-
-func (r *MaasMachineReconciler) recordReleaseAttempt(
-	ctx context.Context,
-	mm *infrav1beta1.MaasMachine,
-	class string,
-) releaseAttempts {
+func (r *MaasMachineReconciler) loadReleaseAttempts(mm *infrav1beta1.MaasMachine) releaseAttempts {
 	state := releaseAttempts{}
 	if mm.Annotations != nil {
 		if raw := mm.Annotations[ReleaseAttemptsAnnotation]; raw != "" {
 			_ = json.Unmarshal([]byte(raw), &state)
 		}
 	}
-	if state.FirstFailure == "" {
-		state.FirstFailure = time.Now().UTC().Format(time.RFC3339)
-	}
-	state.Class = class
-	state.Count++
+	return state
+}
 
+func (r *MaasMachineReconciler) saveReleaseAttempts(ctx context.Context, mm *infrav1beta1.MaasMachine, state releaseAttempts) {
 	raw, err := json.Marshal(state)
 	if err != nil {
 		r.Log.Error(err, "failed to marshal release attempts")
-		return state
+		return
 	}
 	patch := client.MergeFrom(mm.DeepCopy())
 	if mm.Annotations == nil {
@@ -247,8 +360,36 @@ func (r *MaasMachineReconciler) recordReleaseAttempt(
 	}
 	mm.Annotations[ReleaseAttemptsAnnotation] = string(raw)
 	if err := r.Patch(ctx, mm, patch); err != nil {
-		r.Log.Error(err, "failed to record release attempts", "annotations", ReleaseAttemptsAnnotation)
+		r.Log.Error(err, "failed to save release attempts", "annotations", ReleaseAttemptsAnnotation)
 	}
+}
+
+func (r *MaasMachineReconciler) markReleaseSubmitted(ctx context.Context, mm *infrav1beta1.MaasMachine, class, parentID string) releaseAttempts {
+	state := r.loadReleaseAttempts(mm)
+	if state.FirstFailure == "" && class != releaseClassSubmitted {
+		state.FirstFailure = time.Now().UTC().Format(time.RFC3339)
+	}
+	state.Class = class
+	state.Count++
+	state.Submitted = true
+	state.SubmitTime = time.Now().UTC().Format(time.RFC3339)
+	state.ParentHost = parentID
+	r.saveReleaseAttempts(ctx, mm, state)
+	return state
+}
+
+func (r *MaasMachineReconciler) recordReleaseAttempt(
+	ctx context.Context,
+	mm *infrav1beta1.MaasMachine,
+	class string,
+) releaseAttempts {
+	state := r.loadReleaseAttempts(mm)
+	if state.FirstFailure == "" {
+		state.FirstFailure = time.Now().UTC().Format(time.RFC3339)
+	}
+	state.Class = class
+	state.Count++
+	r.saveReleaseAttempts(ctx, mm, state)
 	return state
 }
 
@@ -323,21 +464,11 @@ func isNotFoundError(err error) bool {
 func releaseBackoff(state releaseAttempts, cfg maint.ReleaseConfig) time.Duration {
 	initial := cfg.InitialBackoff
 	if initial <= 0 {
-		initial = 30 * time.Second
+		initial = time.Minute
 	}
 	max := cfg.MaxBackoff
 	if max <= 0 {
-		max = 5 * time.Minute
-	}
-	budget := cfg.RetryBudget
-	if budget <= 0 {
-		budget = 15 * time.Minute
-	}
-
-	if state.FirstFailure != "" {
-		if first, err := time.Parse(time.RFC3339, state.FirstFailure); err == nil && time.Since(first) >= budget {
-			return max
-		}
+		max = 10 * time.Minute
 	}
 
 	backoff := initial
@@ -347,7 +478,15 @@ func releaseBackoff(state releaseAttempts, cfg maint.ReleaseConfig) time.Duratio
 	if backoff > max {
 		backoff = max
 	}
-	return backoff
+	return withJitter(backoff, cfg.Jitter)
+}
+
+func withJitter(d time.Duration, pct float64) time.Duration {
+	if d <= 0 || pct <= 0 {
+		return d
+	}
+	delta := float64(d) * pct
+	return d + time.Duration((rand.Float64()*2-1)*delta)
 }
 
 func hasTag(tags []string, want string) bool {
@@ -385,7 +524,7 @@ func listGuestVMs(
 	timeout time.Duration,
 ) ([]guestVM, error) {
 	if timeout <= 0 {
-		timeout = 3 * time.Minute
+		timeout = 2 * time.Minute
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -426,7 +565,7 @@ func listGuestVMs(
 
 func deleteGuestVMs(ctx context.Context, clusterScope *scope.ClusterScope, guests []guestVM, timeout time.Duration) error {
 	if timeout <= 0 {
-		timeout = 3 * time.Minute
+		timeout = 2 * time.Minute
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

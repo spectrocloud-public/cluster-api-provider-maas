@@ -29,6 +29,9 @@ var (
 	// MachineStateDiskErasing is the string representing an instance which is releasing
 	MachineStateReleasing = MachineState("Releasing")
 
+	// MachineStateFailedReleasing is the string representing a failed release.
+	MachineStateFailedReleasing = MachineState("Failed releasing")
+
 	// MachineStateNew is the string representing an instance which is not yet commissioned
 	MachineStateNew = MachineState("New")
 
