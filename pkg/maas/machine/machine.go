@@ -122,13 +122,13 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 func (s *Service) ReleaseMachine(systemID string) error {
 	ctx := context.TODO()
 
-	// WithErase requests a full disk wipe on release so leftover data (e.g. rook-ceph
-	// OSD signatures, prior OS install) does not block reuse on the next cluster deploy.
-	// Without secure_erase/quick_erase, MAAS overwrites the whole disk with null bytes.
+	// Do not request a disk erase. MAAS wipe-disks erases every writable disk the
+	// host can see, including SAN LUNs that are still mapped, and this provider
+	// does not check for those attachments before release. Erase stays off unless
+	// a later change asks for it explicitly.
 	_, err := s.maasClient.Machines().
 		Machine(systemID).
 		Releaser().
-		WithErase().
 		Release(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to release machine")

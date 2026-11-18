@@ -108,7 +108,7 @@ func TestMachine(t *testing.T) {
 		mockClientSetInterface.EXPECT().Machines().Return(mockMachines)
 		mockMachines.EXPECT().Machine("abc123").Return(mockMachine)
 		mockMachine.EXPECT().Releaser().Return(mockMachineReleaser)
-		mockMachineReleaser.EXPECT().WithErase().Return(mockMachineReleaser)
+		// WithErase must not be called: release does not request a disk wipe.
 		mockMachineReleaser.EXPECT().Release(gomock.Any()).Return(mockMachine, nil)
 
 		err := s.ReleaseMachine("abc123")
