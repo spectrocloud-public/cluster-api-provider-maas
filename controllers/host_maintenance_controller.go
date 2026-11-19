@@ -207,7 +207,9 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 		// "opID=...; host ... evacuated; finalizer removed"; this branch runs
 		// again after that patch and must not replace it with a bare string.
 		message := "evacuation already completed"
-		if cond := conditions.Get(maasMachine, infrav1beta1.HostEvacuationReadyCondition); cond != nil && strings.Contains(cond.Message, "opID=") {
+		if cond := conditions.Get(maasMachine, infrav1beta1.HostEvacuationReadyCondition); cond != nil &&
+			cond.Status == corev1.ConditionTrue && cond.Reason == infrav1beta1.HostEvacuationCompleteReason &&
+			strings.Contains(cond.Message, "opID=") {
 			message = cond.Message
 		} else if opID := maasMachine.Annotations[EvacuationCompletedAnnotation]; opID != "" {
 			message = fmt.Sprintf("opID=%s; evacuation already completed", opID)
