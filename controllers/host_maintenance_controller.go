@@ -311,12 +311,16 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 			"Host %s evacuated (opID %s)", hostSystemID, st.OpID)
 	}
 
-	// Mark evacuation completed on the MaasMachine to prevent future sessions
+	// Mark evacuation completed on the MaasMachine to prevent future sessions.
+	// Patch the annotation narrowly: setHostEvacuationCondition's patch helper
+	// updates a copy, so the in-memory resourceVersion can be stale and Update
+	// would conflict even with no other writer.
+	annotationPatch := client.MergeFrom(maasMachine.DeepCopy())
 	if maasMachine.Annotations == nil {
 		maasMachine.Annotations = map[string]string{}
 	}
 	maasMachine.Annotations[EvacuationCompletedAnnotation] = st.OpID
-	if err := r.Update(ctx, maasMachine); err != nil {
+	if err := r.Patch(ctx, maasMachine, annotationPatch); err != nil {
 		log.Error(err, "failed to annotate MaasMachine as evacuation completed")
 		// Not fatal for host cleanup; continue to complete the session
 	}
