@@ -77,6 +77,22 @@ spec:
                   on (e.g maas)
                 minLength: 1
                 type: string
+              eraseDisksOnRelease:
+                default: none
+                description: |-
+                  EraseDisksOnRelease selects the MAAS disk erase requested when a machine is
+                  released. none, the default, sends no erase request, which is the previous
+                  release behavior. full sends erase=true and overwrites the whole disk. quick
+                  adds quick_erase=true: wipefs plus 2 MiB of zeros at the start and end of the
+                  disk. secure adds secure_erase=true: the drive's secure erase, falling back to
+                  a full wipe when the drive does not support it.
+                  A region with enable_disk_erasing_on_release=true can still erase on its own.
+                enum:
+                - none
+                - full
+                - quick
+                - secure
+                type: string
               failureDomains:
                 description: |-
                   FailureDomains are not usually defined on the spec.
