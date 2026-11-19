@@ -32,7 +32,7 @@ import (
 	maint "github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/maintenance"
 )
 
-// Event reasons introduced or reused by S1 (PCP-7843).
+// Event reasons introduced or reused by PCP-7843.
 const (
 	HostEvacuationBlockedEvent   = "EvacuationBlocked"
 	WLCReplacementPendingEvent   = "WLCReplacementPending"

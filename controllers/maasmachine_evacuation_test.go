@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -223,7 +225,11 @@ func TestReconcileMaasMachineRemovesReAddedFinalizer(t *testing.T) {
 				Name:       owner.Name,
 			}}
 
-			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, maasMachine).Build()
+			k8sClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&infrav1beta1.MaasMachine{}).
+				WithObjects(owner, maasMachine).
+				Build()
 			var stored infrav1beta1.MaasMachine
 			g.Expect(k8sClient.Get(context.Background(), types.NamespacedName{
 				Name:      maasMachine.Name,
@@ -234,6 +240,16 @@ func TestReconcileMaasMachineRemovesReAddedFinalizer(t *testing.T) {
 			_, err := reconciler.reconcileMaasMachine(context.Background(), &stored)
 			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(controllerutil.ContainsFinalizer(&stored, HostEvacuationFinalizer)).To(Equal(tt.expectFinalizer))
+
+			var updated infrav1beta1.MaasMachine
+			g.Expect(k8sClient.Get(context.Background(), types.NamespacedName{
+				Name:      maasMachine.Name,
+				Namespace: namespace,
+			}, &updated)).To(Succeed())
+			cond := conditions.Get(&updated, infrav1beta1.HostEvacuationReadyCondition)
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Message).To(ContainSubstring(testEvacuationOpID))
+			g.Expect(strings.Contains(cond.Message, "opID=")).To(BeTrue())
 		})
 	}
 }

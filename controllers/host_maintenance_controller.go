@@ -17,6 +17,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -25,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -201,8 +203,17 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 				return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 			}
 		}
+		// Keep the opID in the terminal message. The completion path writes
+		// "opID=...; host ... evacuated; finalizer removed"; this branch runs
+		// again after that patch and must not replace it with a bare string.
+		message := "evacuation already completed"
+		if cond := conditions.Get(maasMachine, infrav1beta1.HostEvacuationReadyCondition); cond != nil && strings.Contains(cond.Message, "opID=") {
+			message = cond.Message
+		} else if opID := maasMachine.Annotations[EvacuationCompletedAnnotation]; opID != "" {
+			message = fmt.Sprintf("opID=%s; evacuation already completed", opID)
+		}
 		if err := setHostEvacuationCondition(ctx, r.Client, maasMachine, corev1.ConditionTrue,
-			infrav1beta1.HostEvacuationCompleteReason, clusterv1.ConditionSeverityNone, "evacuation already completed"); err != nil {
+			infrav1beta1.HostEvacuationCompleteReason, clusterv1.ConditionSeverityNone, message); err != nil {
 			log.Error(err, "failed to set HostEvacuationReady condition")
 		}
 		r.evacuationState.forget(evacuationStateKey(maasMachine))

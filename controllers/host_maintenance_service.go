@@ -31,8 +31,7 @@ const (
 	HostEvacuationFinalizer = "maas.lxd.io/host-evacuation"
 
 	// EvacuationCheckInterval is the interval for checking evacuation gates.
-	// D18: 60s until the populated vm-host listing + rate limiter (S5/W7)
-	// land, then it can drop to 30s.
+	// 60s until the populated vm-host listing and rate limiter land, then 30s.
 	EvacuationCheckInterval = 60 * time.Second
 )
 

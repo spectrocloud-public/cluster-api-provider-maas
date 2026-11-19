@@ -102,11 +102,11 @@ const (
 
 // Host evacuation conditions and reasons.
 //
-// S1 (PCP-7843) only wires the reasons the current HMC can determine:
+// PCP-7843 only wires the reasons the current HMC can determine:
 // VMsRemaining, WaitingForReplacement, EvacuationCheckFailed and
 // EvacuationComplete. The remaining reasons are defined now so later slices
 // (session ownership, dead-host verdict, timeout, skip-evacuation) share one
-// vocabulary; they are not set by S1.
+// vocabulary; they are not set by this change.
 const (
 	// HostEvacuationReadyCondition reports whether the host is ready to be released.
 	HostEvacuationReadyCondition clusterv1.ConditionType = "HostEvacuationReady"
