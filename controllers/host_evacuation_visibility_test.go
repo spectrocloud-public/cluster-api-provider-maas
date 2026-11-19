@@ -49,6 +49,8 @@ func TestClassifyMaintenanceVM(t *testing.T) {
 		want vmClass
 	}{
 		{name: "control plane", vm: vm("vm-1", maint.TagVMControlPlane, "maas-lxd-wlc-abc"), want: vmClassControlPlane},
+		{name: "cp tag without a cluster tag", vm: vm("vm-5", maint.TagVMControlPlane), want: vmClassUnmanaged},
+		{name: "cluster tag without cp", vm: vm("vm-6", "maas-lxd-wlc-abc", "some-other-tag"), want: vmClassUnmanaged},
 		{name: "worker tag is unmanaged until F3", vm: vm("vm-2", "maas-lxd-wlc-worker", "maas-lxd-wlc-abc"), want: vmClassUnmanaged},
 		{name: "unmanaged", vm: vm("vm-3", "some-other-tag"), want: vmClassUnmanaged},
 		{name: "no tags", vm: vm("vm-4"), want: vmClassUnmanaged},
@@ -65,9 +67,9 @@ func TestClassifyMaintenanceVM(t *testing.T) {
 func TestBuildHostEvacuationSnapshot(t *testing.T) {
 	vms := []maint.Machine{
 		vm("vm-6"),
-		vm("vm-2", maint.TagVMControlPlane),
+		vm("vm-2", maint.TagVMControlPlane, "maas-lxd-wlc-abc"),
 		vm("vm-4"),
-		vm("vm-1", maint.TagVMControlPlane),
+		vm("vm-1", maint.TagVMControlPlane, "maas-lxd-wlc-abc"),
 		vm("vm-5", "maas-lxd-wlc-worker"),
 		vm("vm-3"),
 	}
@@ -103,7 +105,7 @@ func TestBuildHostEvacuationMessage(t *testing.T) {
 	}
 
 	snap := buildHostEvacuationSnapshot([]maint.Machine{
-		vm("vm-1", maint.TagVMControlPlane),
+		vm("vm-1", maint.TagVMControlPlane, "maas-lxd-wlc-abc"),
 		vm("vm-2", "maas-lxd-wlc-worker"),
 		vm("vm-3"),
 	})
@@ -154,7 +156,7 @@ func TestReportEvacuationSnapshotDeduplicatesEvents(t *testing.T) {
 	r := &HMCMaintenanceReconciler{Client: c, Recorder: events}
 	log := logr.Discard()
 
-	first := []maint.Machine{vm("vm-1", maint.TagVMControlPlane)}
+	first := []maint.Machine{vm("vm-1", maint.TagVMControlPlane, "maas-lxd-wlc-abc")}
 	r.reportEvacuationSnapshot(context.Background(), mm, log, "host-1", "op-1", first)
 	select {
 	case event := <-events.Events:
@@ -174,7 +176,7 @@ func TestReportEvacuationSnapshotDeduplicatesEvents(t *testing.T) {
 	}
 
 	// Changed VM set: one new event.
-	second := []maint.Machine{vm("vm-1", maint.TagVMControlPlane), vm("vm-2")}
+	second := []maint.Machine{vm("vm-1", maint.TagVMControlPlane, "maas-lxd-wlc-abc"), vm("vm-2")}
 	r.reportEvacuationSnapshot(context.Background(), mm, log, "host-1", "op-1", second)
 	select {
 	case event := <-events.Events:
@@ -236,5 +238,95 @@ func TestSetHostEvacuationConditionPersistsStatus(t *testing.T) {
 	cond = conditions.Get(got, infrav1beta1.HostEvacuationReadyCondition)
 	if cond == nil || cond.Status != corev1.ConditionTrue || cond.Reason != infrav1beta1.HostEvacuationCompleteReason {
 		t.Fatalf("true condition = %+v", cond)
+	}
+}
+
+func TestSetHostEvacuationConditionPreservesOtherConditions(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := infrav1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	mm := &infrav1beta1.MaasMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: "host", Namespace: "default"},
+	}
+	conditions.Set(mm, &clusterv1.Condition{
+		Type:   "Ready",
+		Status: corev1.ConditionTrue,
+		Reason: "Ready",
+	})
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1beta1.MaasMachine{}).
+		WithObjects(mm).
+		Build()
+	ctx := context.Background()
+
+	// HMC's snapshot predates a MachineDeployed update by the MaasMachine
+	// controller. The status patch must merge conditions, not replace the list.
+	stale := &infrav1beta1.MaasMachine{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "host"}, stale); err != nil {
+		t.Fatalf("get stale: %v", err)
+	}
+	latest := &infrav1beta1.MaasMachine{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "host"}, latest); err != nil {
+		t.Fatalf("get latest: %v", err)
+	}
+	conditions.Set(latest, &clusterv1.Condition{
+		Type:   infrav1beta1.MachineDeployedCondition,
+		Status: corev1.ConditionTrue,
+		Reason: "Deployed",
+	})
+	if err := c.Status().Update(ctx, latest); err != nil {
+		t.Fatalf("update latest: %v", err)
+	}
+
+	if err := setHostEvacuationCondition(ctx, c, stale, corev1.ConditionFalse,
+		infrav1beta1.HostEvacuationVMsRemainingReason, clusterv1.ConditionSeverityWarning,
+		"opID=op-1; 1 VM(s) remaining"); err != nil {
+		t.Fatalf("set condition: %v", err)
+	}
+
+	got := &infrav1beta1.MaasMachine{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "host"}, got); err != nil {
+		t.Fatalf("get machine: %v", err)
+	}
+	for _, want := range []clusterv1.ConditionType{"Ready", infrav1beta1.MachineDeployedCondition, infrav1beta1.HostEvacuationReadyCondition} {
+		if conditions.Get(got, want) == nil {
+			t.Errorf("condition %q was lost", want)
+		}
+	}
+}
+
+type stubInventory struct {
+	maint.InventoryService
+	vms   []maint.Machine
+	calls int
+}
+
+func (s *stubInventory) ListHostVMs(string) ([]maint.Machine, error) {
+	s.calls++
+	return s.vms, nil
+}
+
+func TestCheckEvacuationGatesReturnsItsInventory(t *testing.T) {
+	hostSystemID := "host-1"
+	inventory := &stubInventory{vms: []maint.Machine{vm("vm-1")}}
+	svc := &HostMaintenanceService{inventoryService: inventory}
+	mm := &infrav1beta1.MaasMachine{
+		Spec: infrav1beta1.MaasMachineSpec{SystemID: &hostSystemID},
+	}
+
+	ready, vms, err := svc.CheckEvacuationGates(context.Background(), mm, logr.Discard())
+	if err != nil {
+		t.Fatalf("CheckEvacuationGates: %v", err)
+	}
+	if ready {
+		t.Fatal("host with a VM must be blocked")
+	}
+	if len(vms) != 1 || vms[0].SystemID != "vm-1" {
+		t.Fatalf("vms = %+v, want the listed VM", vms)
+	}
+	if inventory.calls != 1 {
+		t.Fatalf("ListHostVMs calls = %d, want 1", inventory.calls)
 	}
 }

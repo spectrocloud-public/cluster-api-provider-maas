@@ -84,6 +84,7 @@ func (r *MaasMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	err := r.Get(ctx, req.NamespacedName, maasMachine)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
+			r.evacuationState.forget(req.Namespace + "/" + req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -178,6 +179,12 @@ func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope 
 	machineScope.Info("Reconciling MaasMachine delete")
 
 	maasMachine := machineScope.MaasMachine
+
+	// Nothing left to report once the finalizer is gone; drop the log state so
+	// a deleted host does not stay in the tracker for the process lifetime.
+	if !controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
+		r.evacuationState.forget(evacuationStateKey(maasMachine))
+	}
 
 	// Check if the host evacuation finalizer is present - if so, requeue for HMC controller
 	if controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {

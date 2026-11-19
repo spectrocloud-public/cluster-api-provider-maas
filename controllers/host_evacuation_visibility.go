@@ -26,6 +26,7 @@ import (
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
+	"sigs.k8s.io/cluster-api/util/patch"
 
 	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
 	maint "github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/maintenance"
@@ -84,14 +85,23 @@ func buildHostEvacuationSnapshot(vms []maint.Machine) hostEvacuationSnapshot {
 	return snap
 }
 
-// classifyMaintenanceVM identifies the owner class from MAAS tags. Worker VM
-// tags are a future improvement (F3); until they exist, non-CP VMs, including
-// LXD worker VMs, are reported as unmanaged.
+// classifyMaintenanceVM identifies the owner class from MAAS tags. A CP VM
+// carries both maas-lxd-wlc-cp and maas-lxd-wlc-<clusterID>, matching gate 2.
+// Worker VM tags are a future improvement (F3); until they exist, non-CP VMs,
+// including LXD worker VMs, are reported as unmanaged.
 func classifyMaintenanceVM(vm maint.Machine) vmClass {
+	controlPlane := false
+	cluster := false
 	for _, tag := range vm.Tags {
 		if tag == maint.TagVMControlPlane {
-			return vmClassControlPlane
+			controlPlane = true
 		}
+		if maint.IsVMClusterTag(tag) {
+			cluster = true
+		}
+	}
+	if controlPlane && cluster {
+		return vmClassControlPlane
 	}
 	return vmClassUnmanaged
 }
@@ -142,7 +152,19 @@ func setHostEvacuationCondition(
 	if maasMachine == nil {
 		return nil
 	}
-	patch := client.MergeFrom(maasMachine.DeepCopy())
+	if existing := conditions.Get(maasMachine, infrav1beta1.HostEvacuationReadyCondition); existing != nil &&
+		existing.Status == status && existing.Severity == severity &&
+		existing.Reason == reason && existing.Message == message {
+		return nil
+	}
+
+	// Update only HostEvacuationReady. A plain merge patch would replace the
+	// whole conditions array from our snapshot and can revert Ready or
+	// MachineDeployed written concurrently by the MaasMachine controller.
+	helper, err := patch.NewHelper(maasMachine, c)
+	if err != nil {
+		return err
+	}
 	conditions.Set(maasMachine, &clusterv1.Condition{
 		Type:     infrav1beta1.HostEvacuationReadyCondition,
 		Status:   status,
@@ -150,7 +172,9 @@ func setHostEvacuationCondition(
 		Reason:   reason,
 		Message:  message,
 	})
-	return c.Status().Patch(ctx, maasMachine, patch)
+	return helper.Patch(ctx, maasMachine, patch.WithOwnedV1Beta1Conditions{
+		Conditions: []clusterv1.ConditionType{infrav1beta1.HostEvacuationReadyCondition},
+	})
 }
 
 // evacuationStateTracker remembers the last state signature per object so HMC

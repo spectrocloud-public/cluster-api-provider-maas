@@ -17,7 +17,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -199,7 +198,7 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 			controllerutil.RemoveFinalizer(maasMachine, HostEvacuationFinalizer)
 			if err := r.Update(ctx, maasMachine); err != nil {
 				log.Error(err, "failed to remove re-added evacuation finalizer")
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+				return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 			}
 		}
 		if err := setHostEvacuationCondition(ctx, r.Client, maasMachine, corev1.ConditionTrue,
@@ -214,6 +213,7 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 	// Evacuation finalizer should have been added proactively during reconcileNormal
 	// If it's missing, log a warning but don't try to add it (Kubernetes won't allow it during deletion)
 	if !controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
+		r.evacuationState.forget(evacuationStateKey(maasMachine))
 		log.Error(nil, "⚠️ Evacuation finalizer missing - should have been added proactively during reconcileNormal",
 			"maasMachine", maasMachine.Name,
 			"finalizers", maasMachine.Finalizers)
@@ -226,7 +226,7 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 	if err != nil {
 		log.Error(err, "failed to load maintenance session")
 		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+		return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 	}
 
 	// If no active session exists, start one
@@ -236,13 +236,13 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 			if err != nil {
 				log.Error(err, "failed to start maintenance session")
 				r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+				return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 			}
 			log.Info("Maintenance session started", "opId", st.OpID, "host", st.CurrentHost)
 		}
 	}
 
-	log.Info("Processing host evacuation for MaasMachine deletion", "opID", st.OpID)
+	log.V(1).Info("Processing host evacuation for MaasMachine deletion", "opID", st.OpID)
 
 	// Get system ID
 	if maasMachine.Spec.SystemID == nil {
@@ -258,43 +258,44 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 	if err != nil {
 		log.Error(err, "failed to create MAAS client")
 		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+		return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 	}
 	tagService := maint.NewTagService(maasClient)
 
 	if err := maint.EnsureHostMaintenanceTags(tagService, hostSystemID, st.OpID); err != nil {
 		log.Error(err, "failed to ensure maintenance tags")
 		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+		return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 	}
-	log.Info("Maintenance tags ensured", "host", hostSystemID, "opId", st.OpID)
+	log.V(1).Info("Maintenance tags ensured", "host", hostSystemID, "opId", st.OpID)
 
 	// Create host maintenance service
 	hmcService, err := NewHostMaintenanceService(r.Client, maasMachine.Namespace)
 	if err != nil {
 		log.Error(err, "failed to create host maintenance service")
 		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+		return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 	}
 
-	// Check evacuation gates
-	evacuationReady, err := hmcService.CheckEvacuationGates(ctx, maasMachine, log)
+	// Check evacuation gates. Reuse the inventory it listed for the condition:
+	// a second ListHostVMs is a full machine list plus one GET per VM.
+	evacuationReady, vms, err := hmcService.CheckEvacuationGates(ctx, maasMachine, log)
 	if err != nil {
 		log.Error(err, "failed to check evacuation gates")
 		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+		return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 	}
 
 	if !evacuationReady {
-		r.reportEvacuationBlocked(ctx, maasMachine, hmcService, log, hostSystemID, st.OpID)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		r.reportEvacuationSnapshot(ctx, maasMachine, log, hostSystemID, st.OpID, vms)
+		return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, nil
 	}
 
 	// Evacuation gates are met, clear tags and remove finalizer
 	if err := hmcService.ClearMaintenanceTagsAndRemoveFinalizer(ctx, maasMachine, log); err != nil {
 		log.Error(err, "failed to clear maintenance tags and remove finalizer")
 		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+		return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 	}
 
 	// The finalizer is gone, so the release can proceed; record the terminal
@@ -325,7 +326,7 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 	if err := maint.CompleteSession(ctx, r.Client, maasMachine.Namespace); err != nil {
 		log.Error(err, "failed to complete maintenance session", "opID", st.OpID)
 		// Don't block on session completion failure
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+		return ctrl.Result{RequeueAfter: EvacuationCheckInterval}, err
 	}
 
 	// Verify session was completed
@@ -345,26 +346,9 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 	return ctrl.Result{}, nil
 }
 
-// reportEvacuationBlocked publishes the current evacuation state on the host
+// reportEvacuationSnapshot publishes the current evacuation state on the host
 // MaasMachine. It emits an event and a state-change log line only when the VM
-// set or the reason changes, not on every 10s requeue.
-func (r *HMCMaintenanceReconciler) reportEvacuationBlocked(
-	ctx context.Context,
-	maasMachine *infrav1beta1.MaasMachine,
-	svc *HostMaintenanceService,
-	log logr.Logger,
-	hostSystemID, opID string,
-) {
-	vms, err := svc.ListHostVMs(hostSystemID)
-	if err != nil {
-		log.Error(err, "failed to list host VMs for evacuation condition")
-		r.setEvacuationCheckFailed(ctx, maasMachine, log, err)
-		return
-	}
-	r.reportEvacuationSnapshot(ctx, maasMachine, log, hostSystemID, opID, vms)
-}
-
-// reportEvacuationSnapshot is the testable half of reportEvacuationBlocked.
+// set or the reason changes, not on every requeue.
 func (r *HMCMaintenanceReconciler) reportEvacuationSnapshot(
 	ctx context.Context,
 	maasMachine *infrav1beta1.MaasMachine,

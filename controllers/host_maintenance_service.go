@@ -30,8 +30,10 @@ const (
 	// HostEvacuationFinalizer is the finalizer that blocks deletion until evacuation criteria are met
 	HostEvacuationFinalizer = "maas.lxd.io/host-evacuation"
 
-	// EvacuationCheckInterval is the interval for checking evacuation gates
-	EvacuationCheckInterval = 10 * time.Second
+	// EvacuationCheckInterval is the interval for checking evacuation gates.
+	// D18: 60s until the populated vm-host listing + rate limiter (S5/W7)
+	// land, then it can drop to 30s.
+	EvacuationCheckInterval = 60 * time.Second
 )
 
 // HostMaintenanceService provides evacuation logic for MaasMachine controller
@@ -71,41 +73,38 @@ func (s *HostMaintenanceService) AddEvacuationFinalizer(ctx context.Context, maa
 	return nil
 }
 
-// CheckEvacuationGates checks if evacuation criteria are met for host deletion
-func (s *HostMaintenanceService) CheckEvacuationGates(ctx context.Context, maasMachine *infrav1beta1.MaasMachine, log logr.Logger) (bool, error) {
+// CheckEvacuationGates checks if evacuation criteria are met for host deletion.
+// It returns the VM inventory it listed so callers can report the same snapshot
+// without a second MAAS list.
+func (s *HostMaintenanceService) CheckEvacuationGates(ctx context.Context, maasMachine *infrav1beta1.MaasMachine, log logr.Logger) (bool, []maint.Machine, error) {
 	if maasMachine.Spec.SystemID == nil {
-		return false, fmt.Errorf("maasMachine has no systemID")
+		return false, nil, fmt.Errorf("maasMachine has no systemID")
 	}
 	hostSystemID := *maasMachine.Spec.SystemID
 
 	// Gate 1: Check if host is empty (no VMs running).
 	vms, err := s.inventoryService.ListHostVMs(hostSystemID)
 	if err != nil {
-		return false, fmt.Errorf("failed to list host VMs: %w", err)
+		return false, nil, fmt.Errorf("failed to list host VMs: %w", err)
 	}
 	if len(vms) > 0 {
-		log.Info("Host not empty, evacuation blocked", "host", hostSystemID, "vmCount", len(vms))
-		return false, nil
+		log.V(1).Info("Host not empty, evacuation blocked", "host", hostSystemID, "vmCount", len(vms))
+		return false, vms, nil
 	}
-	log.Info("Host is empty (no VMs)", "host", hostSystemID)
+	log.V(1).Info("Host is empty (no VMs)", "host", hostSystemID)
 
 	// Gate 2: Check per-WLC ready-op-<uuid> tags on CP VMs.
 	wlcReady, err := s.checkWLCReadyTags(ctx, hostSystemID, log)
 	if err != nil {
-		return false, fmt.Errorf("failed to check WLC ready tags: %w", err)
+		return false, vms, fmt.Errorf("failed to check WLC ready tags: %w", err)
 	}
 	if !wlcReady {
-		log.Info("WLC ready tags not met, evacuation blocked", "host", hostSystemID)
-		return false, nil
+		log.V(1).Info("WLC ready tags not met, evacuation blocked", "host", hostSystemID)
+		return false, vms, nil
 	}
 
-	log.Info("All evacuation gates met", "host", hostSystemID)
-	return true, nil
-}
-
-// ListHostVMs exposes the host VM inventory to HMC for condition reporting.
-func (s *HostMaintenanceService) ListHostVMs(hostSystemID string) ([]maint.Machine, error) {
-	return s.inventoryService.ListHostVMs(hostSystemID)
+	log.V(1).Info("All evacuation gates met", "host", hostSystemID)
+	return true, vms, nil
 }
 
 // ClearMaintenanceTagsAndRemoveFinalizer clears maintenance tags and removes the evacuation finalizer
@@ -232,8 +231,8 @@ func (s *HostMaintenanceService) checkWLCReadyTags(ctx context.Context, hostSyst
 			if tag == maint.TagVMControlPlane {
 				isCPVM = true
 			}
-			// Look for cluster tag (maas-lxd-wlc-*)
-			if strings.HasPrefix(tag, maint.TagVMClusterPrefix) {
+			// Look for cluster tag (maas-lxd-wlc-<clusterID>)
+			if maint.IsVMClusterTag(tag) {
 				clusterTag = tag
 			}
 		}
