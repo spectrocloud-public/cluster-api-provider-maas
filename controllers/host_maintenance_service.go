@@ -23,8 +23,6 @@ import (
 	"github.com/go-logr/logr"
 	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
 	maint "github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/maintenance"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -32,8 +30,9 @@ const (
 	// HostEvacuationFinalizer is the finalizer that blocks deletion until evacuation criteria are met
 	HostEvacuationFinalizer = "maas.lxd.io/host-evacuation"
 
-	// EvacuationCheckInterval is the interval for checking evacuation gates
-	EvacuationCheckInterval = 10 * time.Second
+	// EvacuationCheckInterval is the interval for checking evacuation gates.
+	// 60s until the populated vm-host listing and rate limiter land, then 30s.
+	EvacuationCheckInterval = 60 * time.Second
 )
 
 // HostMaintenanceService provides evacuation logic for MaasMachine controller
@@ -42,11 +41,10 @@ type HostMaintenanceService struct {
 	namespace        string
 	tagService       maint.TagService
 	inventoryService maint.InventoryService
-	recorder         record.EventRecorder
 }
 
-// NewHostMaintenanceService creates a new host maintenance service
-func NewHostMaintenanceService(k8sClient client.Client, namespace string, recorder record.EventRecorder) (*HostMaintenanceService, error) {
+// NewHostMaintenanceService creates a new host maintenance service.
+func NewHostMaintenanceService(k8sClient client.Client, namespace string) (*HostMaintenanceService, error) {
 	maasClient, err := maint.NewMAASClient(k8sClient, namespace)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MAAS client: %w", err)
@@ -56,7 +54,6 @@ func NewHostMaintenanceService(k8sClient client.Client, namespace string, record
 		namespace:        namespace,
 		tagService:       maint.NewTagService(maasClient),
 		inventoryService: maint.NewInventoryService(maasClient),
-		recorder:         recorder,
 	}, nil
 }
 
@@ -75,93 +72,38 @@ func (s *HostMaintenanceService) AddEvacuationFinalizer(ctx context.Context, maa
 	return nil
 }
 
-// CheckEvacuationGates checks if evacuation criteria are met for host deletion
-func (s *HostMaintenanceService) CheckEvacuationGates(ctx context.Context, maasMachine *infrav1beta1.MaasMachine, log logr.Logger) (bool, error) {
+// CheckEvacuationGates checks if evacuation criteria are met for host deletion.
+// It returns the VM inventory it listed so callers can report the same snapshot
+// without a second MAAS list.
+func (s *HostMaintenanceService) CheckEvacuationGates(ctx context.Context, maasMachine *infrav1beta1.MaasMachine, log logr.Logger) (bool, []maint.Machine, error) {
 	if maasMachine.Spec.SystemID == nil {
-		return false, fmt.Errorf("maasMachine has no systemID")
+		return false, nil, fmt.Errorf("maasMachine has no systemID")
 	}
 	hostSystemID := *maasMachine.Spec.SystemID
 
-	// Gate 1: Check if host is empty (no VMs running)
-	// Get VMs list first so we can include names in event if host is not empty
+	// Gate 1: Check if host is empty (no VMs running).
 	vms, err := s.inventoryService.ListHostVMs(hostSystemID)
 	if err != nil {
-		return false, fmt.Errorf("failed to list host VMs: %w", err)
+		return false, nil, fmt.Errorf("failed to list host VMs: %w", err)
 	}
-
-	hostEmpty := len(vms) == 0
-	if hostEmpty {
-		log.Info("Host is empty (no VMs)", "host", hostSystemID)
-	} else {
-		// Get host details to use hostname in event
-		hostDetails, err := s.inventoryService.GetHost(hostSystemID)
-		hostName := hostSystemID // fallback to systemID
-		if err == nil {
-			if hostDetails.FQDN != "" {
-				hostName = hostDetails.FQDN
-			} else if hostDetails.Hostname != "" {
-				hostName = hostDetails.Hostname
-			}
-		}
-
-		// Build list of VM names/identifiers for the event
-		vmNames := make([]string, 0, len(vms))
-		for _, vm := range vms {
-			// Prefer FQDN or Hostname, fallback to SystemID
-			vmName := vm.FQDN
-			if vmName == "" {
-				vmName = vm.Hostname
-			}
-			if vmName == "" {
-				vmName = vm.SystemID
-			}
-			vmNames = append(vmNames, vmName)
-		}
-
-		log.Info("Host not empty, evacuation blocked", "host", hostSystemID, "vmCount", len(vms), "vms", vmNames)
-
-		// Emit Kubernetes event with VM names
-		if s.recorder != nil {
-			vmNamesStr := strings.Join(vmNames, ", ")
-			s.recorder.Eventf(maasMachine, corev1.EventTypeWarning, "EvacuationBlocked",
-				"Host evacuation blocked: %d VM(s) still present on host %s: %s",
-				len(vms), hostName, vmNamesStr)
-		}
-
-		return false, nil
+	if len(vms) > 0 {
+		log.V(1).Info("Host not empty, evacuation blocked", "host", hostSystemID, "vmCount", len(vms))
+		return false, vms, nil
 	}
+	log.V(1).Info("Host is empty (no VMs)", "host", hostSystemID)
 
-	// Gate 2: Check per-WLC ready-op-<uuid> tags on CP VMs
+	// Gate 2: Check per-WLC ready-op-<uuid> tags on CP VMs.
 	wlcReady, err := s.checkWLCReadyTags(ctx, hostSystemID, log)
 	if err != nil {
-		return false, fmt.Errorf("failed to check WLC ready tags: %w", err)
+		return false, vms, fmt.Errorf("failed to check WLC ready tags: %w", err)
 	}
-
 	if !wlcReady {
-		// Get host details to use hostname in event
-		hostDetails, err := s.inventoryService.GetHost(hostSystemID)
-		hostName := hostSystemID // fallback to systemID
-		if err == nil {
-			if hostDetails.FQDN != "" {
-				hostName = hostDetails.FQDN
-			} else if hostDetails.Hostname != "" {
-				hostName = hostDetails.Hostname
-			}
-		}
-
-		log.Info("WLC ready tags not met, evacuation blocked", "host", hostSystemID)
-
-		// Emit Kubernetes event
-		if s.recorder != nil {
-			s.recorder.Eventf(maasMachine, corev1.EventTypeWarning, "WLCReplacementPending",
-				"WLC evacuation blocked: waiting for replacement VMs on host %s", hostName)
-		}
-
-		return false, nil
+		log.V(1).Info("WLC ready tags not met, evacuation blocked", "host", hostSystemID)
+		return false, vms, nil
 	}
 
-	log.Info("All evacuation gates met", "host", hostSystemID)
-	return true, nil
+	log.V(1).Info("All evacuation gates met", "host", hostSystemID)
+	return true, vms, nil
 }
 
 // ClearMaintenanceTagsAndRemoveFinalizer clears maintenance tags and removes the evacuation finalizer
@@ -288,8 +230,8 @@ func (s *HostMaintenanceService) checkWLCReadyTags(ctx context.Context, hostSyst
 			if tag == maint.TagVMControlPlane {
 				isCPVM = true
 			}
-			// Look for cluster tag (maas-lxd-wlc-*)
-			if strings.HasPrefix(tag, maint.TagVMClusterPrefix) {
+			// Look for cluster tag (maas-lxd-wlc-<clusterID>)
+			if maint.IsVMClusterTag(tag) {
 				clusterTag = tag
 			}
 		}
