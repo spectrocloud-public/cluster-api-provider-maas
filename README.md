@@ -30,6 +30,26 @@ make deploy
 make test
 ```
 
+### Diagnostics and profiling
+
+The manager serves metrics and `pprof` from one TLS diagnostics
+endpoint (`--diagnostics-address`, default `:8443`), authorised per request via
+TokenReview/SubjectAccessReview. `--insecure-diagnostics` serves plain-HTTP metrics only, with
+no authentication and no `pprof`. `--metrics-bind-addr` is deprecated and ignored.
+
+The serving certificate is self-signed and localhost-only, so every scraper and every
+`curl` must skip TLS verification (`-k`, or `insecureSkipVerify: true`).
+`--tls-min-version` and `--tls-cipher-suites` apply to this endpoint and to the webhook
+server.
+
+To collect a profile, use a token for a ServiceAccount allowed to `get` the
+`/debug/pprof/*` non-resource URL:
+
+```bash
+kubectl -n <namespace> port-forward deploy/capmaas-controller-manager 8443:8443 &
+curl -sk -H "Authorization: Bearer $TOKEN" https://localhost:8443/debug/pprof/heap > heap.pb.gz
+```
+
 ## LXD Integration
 
 This provider supports dynamic LXD VM creation for workload clusters. This involves two main stages:
