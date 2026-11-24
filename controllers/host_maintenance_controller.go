@@ -21,6 +21,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -333,7 +334,7 @@ func (r *HMCMaintenanceReconciler) reconcileMaasMachine(ctx context.Context, maa
 		maasMachine.Annotations = map[string]string{}
 	}
 	maasMachine.Annotations[EvacuationCompletedAnnotation] = st.OpID
-	if err := r.Patch(ctx, maasMachine, annotationPatch); err != nil {
+	if err := r.Patch(ctx, maasMachine, annotationPatch); err != nil && !apierrors.IsNotFound(err) {
 		log.Error(err, "failed to annotate MaasMachine as evacuation completed")
 		// Not fatal for host cleanup; continue to complete the session
 	}

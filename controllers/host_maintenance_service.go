@@ -29,11 +29,11 @@ import (
 const (
 	// HostEvacuationFinalizer is the finalizer that blocks deletion until evacuation criteria are met
 	HostEvacuationFinalizer = "maas.lxd.io/host-evacuation"
-
-	// EvacuationCheckInterval is the interval for checking evacuation gates.
-	// 60s until the populated vm-host listing and rate limiter land, then 30s.
-	EvacuationCheckInterval = 60 * time.Second
 )
+
+// EvacuationCheckInterval is the HMC requeue interval. Read it from the shared
+// HMC config instead of defining a second hardcoded value.
+var EvacuationCheckInterval = maint.DefaultHMCConfig().EvacuationCheckInterval
 
 // HostMaintenanceService provides evacuation logic for MaasMachine controller
 type HostMaintenanceService struct {

@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
@@ -172,9 +173,12 @@ func setHostEvacuationCondition(
 		Reason:   reason,
 		Message:  message,
 	})
-	return helper.Patch(ctx, maasMachine, patch.WithOwnedV1Beta1Conditions{
+	if err := helper.Patch(ctx, maasMachine, patch.WithOwnedV1Beta1Conditions{
 		Conditions: []clusterv1.ConditionType{infrav1beta1.HostEvacuationReadyCondition},
-	})
+	}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // evacuationStateTracker remembers the last state signature per object so HMC
