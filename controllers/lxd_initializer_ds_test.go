@@ -29,7 +29,9 @@ func TestEnsureLXDScript(t *testing.T) {
 		want     bool
 	}{
 		{name: "probes the snap binary", fragment: "bash -lc 'test -x /snap/bin/lxd'", want: true},
-		{name: "installs from the verified channel", fragment: "--channel=\"${LXD_CHANNEL}\"", want: true},
+		{name: "tracks the verified channel", fragment: "--channel=\"${LXD_CHANNEL}\"", want: true},
+		{name: "installs a new host at the resolved revision", fragment: "snap install lxd --revision=\"${CAND_REV}\"", want: true},
+		{name: "does not install the channel tip on a new host", fragment: "snap install lxd --channel=", want: false},
 		{name: "channel is the MAAS-verified series", fragment: "LXD_CHANNEL=5.0/stable", want: true},
 		{name: "holds snap updates", fragment: "snap refresh --hold lxd", want: true},
 		{name: "refresh is off unless enabled", fragment: "AUTO_REFRESH=\"${AUTO_REFRESH:-false}\"", want: true},

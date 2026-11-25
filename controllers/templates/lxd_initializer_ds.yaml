@@ -409,14 +409,28 @@ spec:
             if snap_lxd_present; then
               return 0
             fi
-            echo "Snap LXD not present on host, installing snapd and LXD ${LXD_CHANNEL} on host"
+            echo "Snap LXD not present on host, installing snapd and LXD on host"
             host bash -lc 'command -v snap >/dev/null 2>&1 || { export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y snapd; }'
             host systemctl enable --now snapd.socket
             configure_snap_proxy
-            host snap install lxd --channel="${LXD_CHANNEL}" || {
-              echo "ERROR: Failed to install LXD from channel ${LXD_CHANNEL}"
+            # A new host gets the same version a refresh would install, never an
+            # unvalidated channel tip.
+            until resolve_target ""; do
+              echo "Cannot resolve the LXD version to install; retrying in 10 minutes"
+              sleep 600
+            done
+            echo "Installing LXD ${CAND_VERSION} revision ${CAND_REV} (${ARCH})"
+            host snap install lxd --revision="${CAND_REV}" || {
+              echo "ERROR: Failed to install LXD revision ${CAND_REV}"
               exit 1
             }
+            host snap switch --channel="${LXD_CHANNEL}" lxd || true
+            host snap refresh --hold lxd || true
+            if [[ "$(installed_revision || true)" != "${CAND_REV}" ]]; then
+              echo "ERROR: expected LXD revision ${CAND_REV}, got $(installed_revision || echo none)"
+              exit 1
+            fi
+            mark_status "ok" "installed LXD ${CAND_VERSION} revision ${CAND_REV}"
           }
 
           PREV="$(node_label lxdhost.cluster.com/upgrade-status || true)"
