@@ -449,7 +449,7 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
 			}
 			// With autoRefresh off the DaemonSet is gone and nothing clears a blocked
-			// label, so a stale one must not hold LXDReady at False.
+			// label, so a stale one must not hold LXDReady at False for that reason.
 			policy := lxdPolicyFor(maasCluster)
 			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items, lxdStoreBlockedStatus); policy.AutoRefresh && len(blocked) > 0 {
 				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDRefreshBlockedReason, clusterv1.ConditionSeverityWarning,
@@ -460,13 +460,36 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 			}
 			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items, lxdBlockedStatus); policy.AutoRefresh && len(blocked) > 0 {
 				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDRefreshBlockedReason, clusterv1.ConditionSeverityWarning,
-					"LXD refresh on %s is waiting for an approved version (%s). Validate that version with MAAS, then add it to the cloud.maas.lxd.approvedVersions pack value.",
+					"LXD refresh on %s cannot resolve its target (%s). Set cloud.maas.lxd.targetVersion to a version 5.0/stable offers, or to latest.",
 					strings.Join(blocked, ", "), detail)
-				clusterScope.Info("LXD refresh waiting for an approved version; Palette reconcile is not blocked", "nodes", blocked, "detail", detail)
+				clusterScope.Info("LXD refresh cannot resolve its target; Palette reconcile is not blocked", "nodes", blocked, "detail", detail)
 				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
 			}
 			if policy.AutoRefresh && !lxdRefreshSettled(targetNodes.Items, policy) {
 				return ctrl.Result{RequeueAfter: lxdRefreshActiveRequeue}, nil
+			}
+			// Warnings only: nothing below changes a host, and LXDReady is not part of
+			// the cluster's Ready summary.
+			if policy.TargetError != "" {
+				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDInvalidTargetVersionReason, clusterv1.ConditionSeverityWarning,
+					"LXD refresh is off: %s.", policy.TargetError)
+				clusterScope.Info("LXD targetVersion rejected; not refreshing", "reason", policy.TargetError)
+				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+			}
+			if !policy.AutoRefresh {
+				below, unknown := lxdHostsBelowSecurityMinimum(targetNodes.Items)
+				if len(below) > 0 {
+					conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDBelowSecurityMinimumReason, clusterv1.ConditionSeverityWarning,
+						"LXD on %s is below %s and exposed to CVE-2026-28384. Set cloud.maas.lxd.autoRefresh to true to refresh it to %s.",
+						strings.Join(below, ", "), lxdMinServerVersion, policy.Target)
+					return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+				}
+				if len(unknown) > 0 {
+					conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDBelowSecurityMinimumReason, clusterv1.ConditionSeverityWarning,
+						"LXD version is not recorded on %s, so it may be below %s (CVE-2026-28384). Set cloud.maas.lxd.autoRefresh to true to check these hosts and refresh any older than %s.",
+						strings.Join(unknown, ", "), lxdMinServerVersion, policy.Target)
+					return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+				}
 			}
 		}
 		conditions.MarkTrue(maasCluster, infrav1beta1.LXDReadyCondition)

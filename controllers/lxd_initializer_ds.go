@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	// embed template
@@ -35,28 +36,56 @@ const (
 	lxdDeferRefreshLabel     = "lxdhost.cluster.com/defer-refresh"
 	lxdUpgradeDetailAnnot    = "lxdhost.cluster.com/upgrade-detail"
 	lxdAutoRefreshAnnotation = "infrastructure.cluster.x-k8s.io/lxd-auto-refresh"
-	lxdMinVersionAnnotation  = "infrastructure.cluster.x-k8s.io/lxd-min-version"
-	lxdApprovedAnnotation    = "infrastructure.cluster.x-k8s.io/lxd-approved-versions"
-	lxdBlockedStatus         = "blocked-untested"
+	lxdTargetAnnotation      = "infrastructure.cluster.x-k8s.io/lxd-target-version"
+	lxdBlockedStatus         = "blocked-target"
 	lxdStoreBlockedStatus    = "blocked-store"
 
 	// lxdMinServerVersion is the first 5.0 server version that reports the
 	// CVE-2026-28384 fix. The fix shipped as interim snap 5.0.6-e49d9f4, and the
 	// original 5.0.6 release reports the same server version without it.
 	lxdMinServerVersion = "5.0.7"
+
+	// lxdRecommendedVersion is the 5.0 server version validated against MAAS 3.6/3.7
+	// as an in-place refresh target, including from 5.0.3 with VMs running.
+	lxdRecommendedVersion = "5.0.10"
+
+	// lxdLatestTarget installs what the channel offers, if it is at least the
+	// recommended version.
+	lxdLatestTarget = "latest"
 )
 
-// lxdTestedVersions are the 5.0 server versions validated against MAAS 3.6/3.7 as an
-// in-place refresh target. A refresh installs only one of these.
-var lxdTestedVersions = []string{"5.0.10"}
+// lxdKnownRevisions maps LXD server versions to their snap revision per architecture.
+// The store installs these by revision after the channel has moved on.
+var lxdKnownRevisions = map[string]map[string]string{
+	"5.0.10": {"amd64": "40911", "arm64": "40912"},
+	"5.0.11": {"amd64": "41283", "arm64": "41286"},
+}
 
 var lxdVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
 
-// lxdVersionPolicy decides whether a host is refreshed and what it may be refreshed to.
+// lxdVersionPolicy decides whether a host is refreshed and what it is refreshed to.
 type lxdVersionPolicy struct {
 	AutoRefresh bool
-	Floor       string
-	Approved    []string
+	// Target is a server version or lxdLatestTarget.
+	Target string
+	// RefreshBelow is the server version below which a host is refreshed: Target, or
+	// the recommended version when Target is lxdLatestTarget.
+	RefreshBelow string
+	// TargetError explains why the configured target was rejected. AutoRefresh is
+	// false when it is set.
+	TargetError string
+}
+
+// targetRevisions renders the known revisions of the version a refresh pins, as
+// "arch=revision" pairs, for the initializer script.
+func (p lxdVersionPolicy) targetRevisions() string {
+	revs := lxdKnownRevisions[p.RefreshBelow]
+	pairs := make([]string, 0, len(revs))
+	for arch, rev := range revs {
+		pairs = append(pairs, arch+"="+rev)
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, ",")
 }
 
 //go:embed templates/lxd_initializer_ds.yaml.processed
@@ -449,9 +478,10 @@ func (r *MaasClusterReconciler) renderDaemonSetForCluster(clusterScope *scope.Cl
 		"${TRUST_PASSWORD}":        tp,
 		"${NIC_TYPE}":              nt,
 		"${NIC_PARENT}":            np,
-		"${AUTO_REFRESH}":          auto,
-		"${LXD_MIN_VERSION}":       policy.Floor,
-		"${LXD_APPROVED_VERSIONS}": strings.Join(policy.Approved, ","),
+		"${AUTO_REFRESH}":            auto,
+		"${LXD_TARGET_VERSION}":      policy.Target,
+		"${LXD_TARGET_REVISIONS}":    policy.targetRevisions(),
+		"${LXD_RECOMMENDED_VERSION}": lxdRecommendedVersion,
 	}, lxdInitTemplate)
 
 	ds := &appsv1.DaemonSet{}
@@ -472,16 +502,15 @@ func (r *MaasClusterReconciler) renderDaemonSetForCluster(clusterScope *scope.Cl
 	return ds, nil
 }
 
-// lxdAutoRefreshEnabled reports whether an installed snap below the floor should be refreshed.
-// The spec field wins. The annotation is how Palette pack values opt out before the module bump.
+// lxdAutoRefreshEnabled reports whether installed snaps older than the target are refreshed.
+// It is off unless enabled. The spec field wins; the annotation is how Palette pack
+// values opt in before the module bump.
 func lxdAutoRefreshEnabled(cluster *infrav1beta1.MaasCluster) bool {
 	if cluster != nil && cluster.Spec.LXDConfig != nil && cluster.Spec.LXDConfig.AutoRefresh != nil {
 		return *cluster.Spec.LXDConfig.AutoRefresh
 	}
-	if cluster != nil && cluster.Annotations != nil && strings.EqualFold(cluster.Annotations[lxdAutoRefreshAnnotation], "false") {
-		return false
-	}
-	return true
+	return cluster != nil && cluster.Annotations != nil &&
+		strings.EqualFold(strings.TrimSpace(cluster.Annotations[lxdAutoRefreshAnnotation]), "true")
 }
 
 func nodeIsReady(n corev1.Node) bool {
@@ -493,50 +522,38 @@ func nodeIsReady(n corev1.Node) bool {
 	return false
 }
 
-// lxdPolicyFor builds the refresh policy for a cluster. Spec fields win over the
-// annotations Palette writes from pack values. Overrides can raise the floor and add
-// approved versions; they cannot lower the floor or drop the built-in tested versions.
+// lxdPolicyFor builds the refresh policy for a cluster. The spec field wins over the
+// annotation Palette writes from pack values. An invalid target turns the refresh off
+// rather than installing something the customer did not ask for.
 func lxdPolicyFor(cluster *infrav1beta1.MaasCluster) lxdVersionPolicy {
 	policy := lxdVersionPolicy{
-		AutoRefresh: lxdAutoRefreshEnabled(cluster),
-		Floor:       lxdMinServerVersion,
+		AutoRefresh:  lxdAutoRefreshEnabled(cluster),
+		Target:       lxdRecommendedVersion,
+		RefreshBelow: lxdRecommendedVersion,
 	}
 
-	var cfg *infrav1beta1.LXDConfig
-	var annotations map[string]string
-	if cluster != nil {
-		cfg = cluster.Spec.LXDConfig
-		annotations = cluster.Annotations
+	target := ""
+	if cluster != nil && cluster.Spec.LXDConfig != nil && cluster.Spec.LXDConfig.TargetVersion != "" {
+		target = cluster.Spec.LXDConfig.TargetVersion
+	} else if cluster != nil && cluster.Annotations != nil {
+		target = cluster.Annotations[lxdTargetAnnotation]
 	}
+	target = strings.TrimSpace(target)
 
-	floor := ""
-	if cfg != nil && cfg.MinVersion != "" {
-		floor = cfg.MinVersion
-	} else if annotations != nil {
-		floor = annotations[lxdMinVersionAnnotation]
+	switch {
+	case target == "":
+	case strings.EqualFold(target, lxdLatestTarget):
+		policy.Target = lxdLatestTarget
+	case !lxdVersionPattern.MatchString(target):
+		policy.TargetError = fmt.Sprintf("targetVersion %q is not a version such as 5.0.11 or latest", target)
+	case compareDotVersions(target, lxdMinServerVersion) < 0:
+		policy.TargetError = fmt.Sprintf("targetVersion %s is below %s, the first version with the CVE-2026-28384 fix", target, lxdMinServerVersion)
+	default:
+		policy.Target = target
+		policy.RefreshBelow = target
 	}
-	floor = strings.TrimSpace(floor)
-	if lxdVersionPattern.MatchString(floor) && compareDotVersions(floor, policy.Floor) > 0 {
-		policy.Floor = floor
-	}
-
-	var extra []string
-	if cfg != nil && len(cfg.ApprovedVersions) > 0 {
-		extra = cfg.ApprovedVersions
-	} else if annotations != nil && annotations[lxdApprovedAnnotation] != "" {
-		extra = strings.Split(annotations[lxdApprovedAnnotation], ",")
-	}
-	seen := map[string]struct{}{}
-	for _, v := range append(append([]string{}, lxdTestedVersions...), extra...) {
-		v = strings.TrimSpace(v)
-		if !lxdVersionPattern.MatchString(v) {
-			continue
-		}
-		if _, dup := seen[v]; dup {
-			continue
-		}
-		seen[v] = struct{}{}
-		policy.Approved = append(policy.Approved, v)
+	if policy.TargetError != "" {
+		policy.AutoRefresh = false
 	}
 	return policy
 }
@@ -555,7 +572,7 @@ func nodeNeedsLXDWork(n corev1.Node, policy lxdVersionPolicy) bool {
 	if n.Labels[lxdDeferRefreshLabel] == "true" {
 		return true
 	}
-	return lxdVersionBelowFloor(n.Labels[lxdVersionLabel], policy.Floor)
+	return lxdVersionBelow(n.Labels[lxdVersionLabel], policy.RefreshBelow)
 }
 
 // lxdRefreshSettled is true when the DaemonSet can be removed.
@@ -573,18 +590,36 @@ func lxdRefreshSettled(nodes []corev1.Node, policy lxdVersionPolicy) bool {
 		if strings.HasPrefix(n.Labels[lxdUpgradeStatusLabel], "failed") || n.Labels[lxdDeferRefreshLabel] == "true" {
 			return false
 		}
-		if lxdVersionBelowFloor(n.Labels[lxdVersionLabel], policy.Floor) {
+		if lxdVersionBelow(n.Labels[lxdVersionLabel], policy.RefreshBelow) {
 			return false
 		}
 	}
 	return true
 }
 
-func lxdVersionBelowFloor(version, floor string) bool {
+// lxdVersionBelow treats a missing version as below, so an unchecked host is refreshed.
+func lxdVersionBelow(version, floor string) bool {
 	if version == "" {
 		return true
 	}
 	return compareDotVersions(version, floor) < 0
+}
+
+// lxdHostsBelowSecurityMinimum lists initialized nodes whose recorded LXD version is
+// below lxdMinServerVersion, and those with no recorded version.
+func lxdHostsBelowSecurityMinimum(nodes []corev1.Node) (below, unknown []string) {
+	for _, n := range nodes {
+		if n.Labels == nil || n.Labels[lxdInitializedLabel] != "true" {
+			continue
+		}
+		switch v := n.Labels[lxdVersionLabel]; {
+		case v == "":
+			unknown = append(unknown, n.Name)
+		case compareDotVersions(v, lxdMinServerVersion) < 0:
+			below = append(below, n.Name)
+		}
+	}
+	return below, unknown
 }
 
 func compareDotVersions(a, b string) int {

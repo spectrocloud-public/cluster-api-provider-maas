@@ -42,10 +42,12 @@ spec:
               fieldPath: metadata.namespace
         - name: AUTO_REFRESH
           value: "${AUTO_REFRESH}"
-        - name: LXD_MIN_VERSION
-          value: "${LXD_MIN_VERSION}"
-        - name: LXD_APPROVED_VERSIONS
-          value: "${LXD_APPROVED_VERSIONS}"
+        - name: LXD_TARGET_VERSION
+          value: "${LXD_TARGET_VERSION}"
+        - name: LXD_TARGET_REVISIONS
+          value: "${LXD_TARGET_REVISIONS}"
+        - name: LXD_RECOMMENDED_VERSION
+          value: "${LXD_RECOMMENDED_VERSION}"
         - name: LOCK_NAME
           value: "lxd-initializer"
         - name: LOCK_TTL_SECONDS
@@ -58,17 +60,24 @@ spec:
           # LXD 5.0 is the series verified against our MAAS servers. Never hardcode a
           # revision: snap revisions are per-architecture, so a single number is not
           # installable everywhere (PCP-7159 reports the old pin, 38113, as unavailable
-          # on amd64). A refresh reads the revision the channel offers on this host.
-          # The floor is the first server version that proves the CVE-2026-28384 fix.
-          # 5.0.6 is not enough: the original 5.0.6 release reports the same version
-          # without the fix, which only shipped in the interim snap 5.0.6-e49d9f4.
-          # A refresh installs only an approved version, never just the channel tip.
+          # on amd64). The controller passes "arch=revision" pairs for the target.
+          # A host older than LXD_TARGET_VERSION is refreshed to it: by its known
+          # revision for this architecture, or by the channel when the channel offers
+          # exactly that version. "latest" takes what the channel offers when that is
+          # at least LXD_RECOMMENDED_VERSION. A host is never downgraded.
           LXD_CHANNEL=5.0/stable
-          LXD_MIN_VERSION="${LXD_MIN_VERSION:-5.0.7}"
-          LXD_APPROVED_VERSIONS="${LXD_APPROVED_VERSIONS:-5.0.10}"
-          AUTO_REFRESH="${AUTO_REFRESH:-true}"
+          LXD_TARGET_VERSION="${LXD_TARGET_VERSION:-5.0.10}"
+          LXD_TARGET_REVISIONS="${LXD_TARGET_REVISIONS:-}"
+          LXD_RECOMMENDED_VERSION="${LXD_RECOMMENDED_VERSION:-5.0.10}"
+          AUTO_REFRESH="${AUTO_REFRESH:-false}"
+          if [[ "${LXD_TARGET_VERSION}" == latest ]]; then
+            REFRESH_BELOW="${LXD_RECOMMENDED_VERSION}"
+          else
+            REFRESH_BELOW="${LXD_TARGET_VERSION}"
+          fi
+          ARCH="$(dpkg --print-architecture)"
           LOCK_TTL_SECONDS="${LOCK_TTL_SECONDS:-600}"
-          BLOCKED_STATUS=blocked-untested
+          BLOCKED_STATUS=blocked-target
           STORE_BLOCKED_STATUS=blocked-store
           REFRESHING_STATUS=refreshing
           # Host /run is mounted at /run, so files here are visible to the host's curl.
@@ -136,41 +145,62 @@ spec:
             done
             return 1
           }
-          version_approved() {
-            local want="$1" v
-            local -a list
-            IFS=',' read -ra list <<< "${LXD_APPROVED_VERSIONS}"
-            for v in "${list[@]}"; do
-              [[ "${v// /}" == "${want}" ]] && return 0
+          # Prints the known revision of the pinned version for this architecture.
+          known_revision() {
+            local pair
+            local -a pairs
+            [[ -n "${LXD_TARGET_REVISIONS}" ]] || return 1
+            IFS=',' read -ra pairs <<< "${LXD_TARGET_REVISIONS}"
+            for pair in "${pairs[@]}"; do
+              if [[ "${pair%%=*}" == "${ARCH}" && -n "${pair#*=}" ]]; then
+                echo "${pair#*=}"
+                return 0
+              fi
             done
             return 1
           }
           installed_revision() {
             host snap list lxd 2>/dev/null | awk 'NR == 2 { print $3 }'
           }
-          # Sets CAND_VERSION / CAND_REV and succeeds only when the channel offers an
-          # approved version that moves this host forward past the floor. Otherwise it
-          # records upgrade-status=blocked-untested, which pauses this host but not others.
+          # Sets CAND_VERSION / CAND_REV to the version and revision this host refreshes
+          # to. Otherwise it records upgrade-status=blocked-store or blocked-target, which
+          # pauses this host but not others.
           resolve_target() {
-            local cur="$1" line
+            local cur="$1" line rev chan_version="" chan_rev=""
             CAND_VERSION=""
             CAND_REV=""
-            line="$(channel_candidate || true)"
-            read -r CAND_VERSION CAND_REV <<< "${line}" || true
-            if [[ -z "${CAND_VERSION}" || -z "${CAND_REV}" ]]; then
-              mark_status "${STORE_BLOCKED_STATUS}" "cannot read ${LXD_CHANNEL} from the snap store"
-              return 1
-            fi
-            if ! version_ge "${CAND_VERSION}" "${LXD_MIN_VERSION}"; then
-              mark_status "${BLOCKED_STATUS}" "${LXD_CHANNEL} offers ${CAND_VERSION}, below floor ${LXD_MIN_VERSION}"
-              return 1
+            rev="$(known_revision || true)"
+            if [[ "${LXD_TARGET_VERSION}" != latest && -n "${rev}" ]]; then
+              CAND_VERSION="${LXD_TARGET_VERSION}"
+              CAND_REV="${rev}"
+            else
+              line="$(channel_candidate || true)"
+              read -r chan_version chan_rev <<< "${line}" || true
+              if [[ -z "${chan_version}" || -z "${chan_rev}" ]]; then
+                mark_status "${STORE_BLOCKED_STATUS}" "cannot read ${LXD_CHANNEL} from the snap store"
+                return 1
+              fi
+              if [[ "${LXD_TARGET_VERSION}" == latest ]]; then
+                if version_ge "${chan_version}" "${LXD_RECOMMENDED_VERSION}"; then
+                  CAND_VERSION="${chan_version}"
+                  CAND_REV="${chan_rev}"
+                elif [[ -n "${rev}" ]]; then
+                  CAND_VERSION="${LXD_RECOMMENDED_VERSION}"
+                  CAND_REV="${rev}"
+                else
+                  mark_status "${BLOCKED_STATUS}" "${LXD_CHANNEL} offers ${chan_version}, older than the recommended ${LXD_RECOMMENDED_VERSION}, which has no known revision for ${ARCH}"
+                  return 1
+                fi
+              elif [[ "${chan_version}" == "${LXD_TARGET_VERSION}" ]]; then
+                CAND_VERSION="${chan_version}"
+                CAND_REV="${chan_rev}"
+              else
+                mark_status "${BLOCKED_STATUS}" "${LXD_TARGET_VERSION} has no known revision for ${ARCH} and ${LXD_CHANNEL} offers ${chan_version}"
+                return 1
+              fi
             fi
             if [[ -n "${cur}" ]] && version_ge "${cur}" "${CAND_VERSION}"; then
-              mark_status "${BLOCKED_STATUS}" "${LXD_CHANNEL} offers ${CAND_VERSION}, not newer than server ${cur}"
-              return 1
-            fi
-            if ! version_approved "${CAND_VERSION}"; then
-              mark_status "${BLOCKED_STATUS}" "${LXD_CHANNEL} offers ${CAND_VERSION}; approved: ${LXD_APPROVED_VERSIONS}"
+              mark_status "${BLOCKED_STATUS}" "target ${CAND_VERSION} is not newer than server ${cur}"
               return 1
             fi
             return 0
@@ -430,8 +460,12 @@ spec:
             echo "LXD did not become ready after 5 minutes"; exit 1
           fi
 
-          if [[ "${AUTO_REFRESH}" == "false" ]]; then
-            echo "autoRefresh is false; leaving the installed snap unchanged"
+          CUR="$(server_version)"
+          echo "Current LXC Server version: ${CUR:-unknown}"
+          if [[ "${AUTO_REFRESH}" != "true" ]]; then
+            # The controller warns about hosts below 5.0.7 from this label.
+            if [[ -n "${CUR}" ]]; then label_version "${CUR}"; fi
+            echo "autoRefresh is off; leaving the installed snap unchanged"
             exit 0
           fi
 
@@ -440,24 +474,22 @@ spec:
             sleep 30
           done
 
-          CUR="$(server_version)"
-          echo "Current LXC Server version: ${CUR:-unknown}"
-          if [[ -n "${CUR}" ]] && version_ge "${CUR}" "${LXD_MIN_VERSION}"; then
+          if [[ -n "${CUR}" ]] && version_ge "${CUR}" "${REFRESH_BELOW}"; then
             label_version "${CUR}"
             if [[ "${PREV}" == blocked-* || "${PREV}" == queued || "${PREV}" == pending ]]; then
-              mark_status "ok" "server ${CUR} meets floor ${LXD_MIN_VERSION}"
+              mark_status "ok" "server ${CUR} is at or above ${REFRESH_BELOW}"
             fi
             exit 0
           fi
 
           # Only a refresh needs the store, so leave snapd's proxy alone otherwise.
           configure_snap_proxy
-          # Wait here, outside the lease, until the channel offers an approved version.
-          # New approvals arrive as a DaemonSet change, which restarts this pod.
+          # Wait here, outside the lease, until the target resolves. A new targetVersion
+          # arrives as a DaemonSet change, which restarts this pod.
           until resolve_target "${CUR}"; do
             sleep 600
           done
-          echo "Refresh target: ${CAND_VERSION} revision ${CAND_REV} from ${LXD_CHANNEL}"
+          echo "Refresh target: ${CAND_VERSION} revision ${CAND_REV} (${ARCH})"
           mark_status "queued" "waiting for lease ${LOCK_NAME} to refresh to ${CAND_VERSION}"
 
           if ! host snap changes >/dev/null 2>&1; then
@@ -480,7 +512,7 @@ spec:
           # The queue, the repave label and VM states can all change while this pod waits
           # for the lease, so check them again while holding it. If one blocks the refresh,
           # give the lease back and wait here: exiting 0 would finish the init container
-          # and leave the host below the floor.
+          # and leave the host below its target.
           while true; do
             while refresh_queue_blocked; do
               echo "LXD refresh paused; a node has a failed or unverified LXD refresh"
@@ -517,22 +549,22 @@ spec:
           done
 
           CUR="$(server_version)"
-          if [[ -n "${CUR}" ]] && version_ge "${CUR}" "${LXD_MIN_VERSION}"; then
+          if [[ -n "${CUR}" ]] && version_ge "${CUR}" "${REFRESH_BELOW}"; then
             label_version "${CUR}"
-            mark_status "ok" "server ${CUR} meets floor ${LXD_MIN_VERSION}"
+            mark_status "ok" "server ${CUR} is at or above ${REFRESH_BELOW}"
             exit 0
           fi
           TARGET_VERSION="${CAND_VERSION}"
           TARGET_REV="${CAND_REV}"
           if ! resolve_target "${CUR}" || [[ "${CAND_REV}" != "${TARGET_REV}" ]]; then
-            echo "${LXD_CHANNEL} moved while waiting for the lease; retrying from the start"
+            echo "The refresh target changed while waiting for the lease; retrying from the start"
             exit 1
           fi
 
           qemu_pids > "${WORK}/qemu-pids.pre" || true
           REFRESH_SINCE="$(host date -u '+%Y-%m-%d %H:%M:%S UTC')"
           mark_refreshing "${TARGET_VERSION}" "${TARGET_REV}" "${REFRESH_SINCE}"
-          echo "Refreshing LXD to ${TARGET_VERSION} revision ${TARGET_REV} (server ${CUR:-unknown} is below ${LXD_MIN_VERSION})"
+          echo "Refreshing LXD to ${TARGET_VERSION} revision ${TARGET_REV} (server ${CUR:-unknown} is below ${REFRESH_BELOW})"
           host snap refresh --unhold lxd || true
           if ! host snap refresh lxd --revision="${TARGET_REV}"; then
             host snap refresh --hold lxd || true

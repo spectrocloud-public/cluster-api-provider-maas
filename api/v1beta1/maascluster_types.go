@@ -77,20 +77,18 @@ type LXDConfig struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// AutoRefresh refreshes an installed LXD snap when its server version is below the floor.
-	// Nil or true refreshes. False still installs LXD when the snap is absent.
+	// AutoRefresh refreshes an installed LXD snap that is older than TargetVersion,
+	// one host at a time. Nil or false leaves installed snaps unchanged; LXD is
+	// still installed when the snap is absent.
 	// +optional
 	AutoRefresh *bool `json:"autoRefresh,omitempty"`
 
-	// MinVersion raises the LXD server version below which a host is refreshed.
-	// A value below the floor built into CAPMAAS is ignored.
+	// TargetVersion is the LXD server version a refresh installs, such as "5.0.11".
+	// Empty uses the version CAPMAAS recommends. "latest" installs what the 5.0/stable
+	// channel offers when that is at least the recommended version. Versions below
+	// 5.0.7 are rejected, and a host is never downgraded.
 	// +optional
-	MinVersion string `json:"minVersion,omitempty"`
-
-	// ApprovedVersions adds LXD versions that a refresh may install, on top of the
-	// versions built into CAPMAAS. A refresh waits when the channel offers anything else.
-	// +optional
-	ApprovedVersions []string `json:"approvedVersions,omitempty"`
+	TargetVersion string `json:"targetVersion,omitempty"`
 
 	// ResourcePool specifies the MAAS resource pool to use for LXD VM hosts
 	// +optional
