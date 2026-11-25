@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	infrav1beta1 "github.com/spectrocloud/cluster-api-provider-maas/api/v1beta1"
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/maintenance"
@@ -192,26 +194,38 @@ func TestLXDRefreshNodeReporting(t *testing.T) {
 		Labels:      map[string]string{lxdUpgradeStatusLabel: lxdBlockedStatus},
 		Annotations: map[string]string{lxdUpgradeDetailAnnot: "5.0/stable offers 5.0.11; approved: 5.0.10"},
 	}}
+	storeBlocked := corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name:        "d",
+		Labels:      map[string]string{lxdUpgradeStatusLabel: lxdStoreBlockedStatus},
+		Annotations: map[string]string{lxdUpgradeDetailAnnot: "cannot read 5.0/stable from the snap store"},
+	}}
 	ok := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "c", Labels: map[string]string{lxdUpgradeStatusLabel: "ok"}}}
+	refreshing := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "e", Labels: map[string]string{lxdUpgradeStatusLabel: "refreshing"}}}
 
 	tests := []struct {
-		name        string
-		nodes       []corev1.Node
-		wantFailed  []string
-		wantBlocked []string
-		wantDetail  string
+		name             string
+		nodes            []corev1.Node
+		wantFailed       []string
+		wantBlocked      []string
+		wantDetail       string
+		wantStoreBlocked []string
+		wantStoreDetail  string
 	}{
-		{name: "healthy nodes report nothing", nodes: []corev1.Node{ok}},
-		{name: "failed and blocked are reported separately", nodes: []corev1.Node{failed, blocked, ok},
-			wantFailed: []string{"a"}, wantBlocked: []string{"b"}, wantDetail: "5.0/stable offers 5.0.11; approved: 5.0.10"},
+		{name: "healthy and refreshing nodes report nothing", nodes: []corev1.Node{ok, refreshing}},
+		{name: "failed, untested and store-blocked are reported separately", nodes: []corev1.Node{failed, blocked, storeBlocked, ok},
+			wantFailed: []string{"a"}, wantBlocked: []string{"b"}, wantDetail: "5.0/stable offers 5.0.11; approved: 5.0.10",
+			wantStoreBlocked: []string{"d"}, wantStoreDetail: "cannot read 5.0/stable from the snap store"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewGomegaWithT(t)
 			g.Expect(lxdRefreshFailedNodeNames(tt.nodes)).To(Equal(tt.wantFailed))
-			names, detail := lxdRefreshBlockedNodes(tt.nodes)
+			names, detail := lxdRefreshBlockedNodes(tt.nodes, lxdBlockedStatus)
 			g.Expect(names).To(Equal(tt.wantBlocked))
 			g.Expect(detail).To(Equal(tt.wantDetail))
+			names, detail = lxdRefreshBlockedNodes(tt.nodes, lxdStoreBlockedStatus)
+			g.Expect(names).To(Equal(tt.wantStoreBlocked))
+			g.Expect(detail).To(Equal(tt.wantStoreDetail))
 		})
 	}
 }
@@ -247,6 +261,10 @@ func TestSyncLXDDeferRefresh(t *testing.T) {
 		}
 		return mm
 	}
+	withProviderID := func(mm *infrav1beta1.MaasMachine, id string) *infrav1beta1.MaasMachine {
+		mm.Spec.ProviderID = &id
+		return mm
+	}
 	node := func(name string, deferred bool) *corev1.Node {
 		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{}}}
 		if deferred {
@@ -254,13 +272,60 @@ func TestSyncLXDDeferRefresh(t *testing.T) {
 		}
 		return n
 	}
+	nodeWithProviderID := func(name, id string) *corev1.Node {
+		n := node(name, false)
+		n.Spec.ProviderID = id
+		return n
+	}
+	failMachineGet := interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if _, ok := obj.(*clusterv1.Machine); ok {
+			return errors.New("apiserver unavailable")
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}}
+	failNodePatch := interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+		return errors.New("patch rejected")
+	}}
 
 	tests := []struct {
-		name      string
-		mgmt      []client.Object
-		nodes     []client.Object
-		wantDefer map[string]bool
+		name        string
+		mgmt        []client.Object
+		nodes       []client.Object
+		mgmtFuncs   interceptor.Funcs
+		remoteFuncs interceptor.Funcs
+		wantErr     string
+		wantDefer   map[string]bool
 	}{
+		{
+			name: "defers the node by providerID when the owning Machine is already gone",
+			mgmt: []client.Object{
+				withProviderID(maasMachine("hcp-1-cp-xyz89", "hcp-1-cp-abc12", true), "maas://zone1/abc123"),
+			},
+			nodes:     []client.Object{nodeWithProviderID("node-a", "maas://zone1/abc123"), nodeWithProviderID("node-b", "maas://zone1/def456")},
+			wantDefer: map[string]bool{"node-a": true, "node-b": false},
+		},
+		{
+			name: "returns the error and keeps labels when the owner Machine cannot be read",
+			mgmt: []client.Object{
+				machine("hcp-1-cp-abc12", "node-a", false),
+				maasMachine("hcp-1-cp-xyz89", "hcp-1-cp-abc12", false),
+			},
+			nodes:     []client.Object{node("node-a", true)},
+			mgmtFuncs: failMachineGet,
+			wantErr:   "failed to get owner Machine of MaasMachine hcp-1-cp-xyz89",
+			wantDefer: map[string]bool{"node-a": true},
+		},
+		{
+			name: "returns node patch errors",
+			mgmt: []client.Object{
+				machine("hcp-1-cp-abc12", "node-a", true),
+				maasMachine("hcp-1-cp-xyz89", "hcp-1-cp-abc12", false),
+			},
+			nodes:       []client.Object{node("node-a", false)},
+			remoteFuncs: failNodePatch,
+			wantErr:     "node node-a: patch rejected",
+			wantDefer:   map[string]bool{"node-a": false},
+		},
 		{
 			name: "defers the node of a Machine being deleted under a differently named MaasMachine",
 			mgmt: []client.Object{
@@ -315,11 +380,16 @@ func TestSyncLXDDeferRefresh(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			mgmt := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.mgmt...).Build()
-			remote := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.nodes...).Build()
+			mgmt := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.mgmt...).WithInterceptorFuncs(tt.mgmtFuncs).Build()
+			remote := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.nodes...).WithInterceptorFuncs(tt.remoteFuncs).Build()
 			r := &MaasClusterReconciler{Client: mgmt, Log: logr.Discard()}
 
-			g.Expect(r.syncLXDDeferRefresh(context.Background(), ns, clusterName, remote)).To(Succeed())
+			err := r.syncLXDDeferRefresh(context.Background(), ns, clusterName, remote)
+			if tt.wantErr != "" {
+				g.Expect(err).To(MatchError(ContainSubstring(tt.wantErr)))
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
 
 			for name, want := range tt.wantDefer {
 				n := &corev1.Node{}

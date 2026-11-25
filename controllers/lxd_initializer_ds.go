@@ -11,6 +11,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
@@ -36,6 +38,7 @@ const (
 	lxdMinVersionAnnotation  = "infrastructure.cluster.x-k8s.io/lxd-min-version"
 	lxdApprovedAnnotation    = "infrastructure.cluster.x-k8s.io/lxd-approved-versions"
 	lxdBlockedStatus         = "blocked-untested"
+	lxdStoreBlockedStatus    = "blocked-store"
 
 	// lxdMinServerVersion is the first 5.0 server version that reports the
 	// CVE-2026-28384 fix. The fix shipped as interim snap 5.0.6-e49d9f4, and the
@@ -98,7 +101,16 @@ func (r *MaasClusterReconciler) ensureLXDInitializerDS(ctx context.Context, clus
 	desiredCP, _ := r.computeDesiredControlPlane(ctx, dsNamespace, cluster.Name)
 	policy := lxdPolicyFor(cluster)
 
-	if err := r.syncLXDDeferRefresh(ctx, cluster.Namespace, cluster.Name, remoteClient); err != nil {
+	// Without current defer labels a refresh pod could start on a host being repaved,
+	// so do not create or update the DaemonSet until they are in sync.
+	capiClusterName := cluster.Name
+	if clusterScope.Cluster != nil {
+		capiClusterName = clusterScope.Cluster.Name
+	}
+	if err := r.syncLXDDeferRefresh(ctx, cluster.Namespace, capiClusterName, remoteClient); err != nil {
+		if policy.AutoRefresh {
+			return fmt.Errorf("failed to sync LXD defer-refresh labels: %w", err)
+		}
 		r.Log.Error(err, "failed to sync LXD defer-refresh labels", "namespace", dsNamespace)
 	}
 
@@ -626,11 +638,11 @@ func lxdRefreshFailedNodeNames(nodes []corev1.Node) []string {
 	return names
 }
 
-// lxdRefreshBlockedNodes lists nodes whose refresh is waiting for an approved version,
-// with the detail the initializer recorded (what the channel offers).
-func lxdRefreshBlockedNodes(nodes []corev1.Node) (names []string, detail string) {
+// lxdRefreshBlockedNodes lists nodes whose refresh is waiting with the given status,
+// with the detail the initializer recorded (for example, what the channel offers).
+func lxdRefreshBlockedNodes(nodes []corev1.Node, status string) (names []string, detail string) {
 	for _, n := range nodes {
-		if n.Labels == nil || n.Labels[lxdUpgradeStatusLabel] != lxdBlockedStatus {
+		if n.Labels == nil || n.Labels[lxdUpgradeStatusLabel] != status {
 			continue
 		}
 		names = append(names, n.Name)
@@ -642,9 +654,11 @@ func lxdRefreshBlockedNodes(nodes []corev1.Node) (names []string, detail string)
 }
 
 // syncLXDDeferRefresh marks target nodes whose bare metal is being replaced so the
-// initializer pod waits instead of refreshing LXD under a repave.
+// initializer pod waits instead of refreshing LXD under a repave. Any lookup error
+// returns before labels change: unknown maintenance state must not clear a label.
 func (r *MaasClusterReconciler) syncLXDDeferRefresh(ctx context.Context, namespace, clusterName string, remoteClient client.Client) error {
 	deferNodes := map[string]struct{}{}
+	deferProviderIDs := map[string]struct{}{}
 
 	machines := &infrav1beta1.MaasMachineList{}
 	if err := r.Client.List(ctx, machines, client.InNamespace(namespace), client.MatchingLabels{
@@ -657,7 +671,16 @@ func (r *MaasClusterReconciler) syncLXDDeferRefresh(ctx context.Context, namespa
 		// A repave starts when the owning Machine is deleted. The evacuation finalizer
 		// is no signal: it is added to every HCP host up front.
 		machine, err := capiutil.GetOwnerMachine(ctx, r.Client, mm.ObjectMeta)
-		if err != nil || machine == nil {
+		switch {
+		case apierrors.IsNotFound(err):
+			// The owning Machine is already gone, so this host is on its way out.
+			if mm.Spec.ProviderID != nil && *mm.Spec.ProviderID != "" {
+				deferProviderIDs[*mm.Spec.ProviderID] = struct{}{}
+			}
+			continue
+		case err != nil:
+			return fmt.Errorf("failed to get owner Machine of MaasMachine %s: %w", mm.Name, err)
+		case machine == nil:
 			continue
 		}
 		if mm.DeletionTimestamp.IsZero() && machine.DeletionTimestamp.IsZero() {
@@ -666,27 +689,34 @@ func (r *MaasClusterReconciler) syncLXDDeferRefresh(ctx context.Context, namespa
 		if machine.Status.NodeRef.Name != "" {
 			deferNodes[machine.Status.NodeRef.Name] = struct{}{}
 		}
+		if mm.Spec.ProviderID != nil && *mm.Spec.ProviderID != "" {
+			deferProviderIDs[*mm.Spec.ProviderID] = struct{}{}
+		}
 	}
 
-	if st, _, err := maintenance.LoadSession(ctx, r.Client, namespace); err == nil && st.Status == maintenance.StatusActive && st.CurrentHost != "" {
-		nodeList := &corev1.NodeList{}
-		if err := remoteClient.List(ctx, nodeList); err == nil {
-			suffix := "/" + st.CurrentHost
-			for _, n := range nodeList.Items {
-				if strings.HasSuffix(n.Spec.ProviderID, suffix) {
-					deferNodes[n.Name] = struct{}{}
-				}
-			}
-		}
+	st, _, err := maintenance.LoadSession(ctx, r.Client, namespace)
+	if err != nil {
+		return fmt.Errorf("failed to load host maintenance session: %w", err)
+	}
+	sessionSuffix := ""
+	if st.Status == maintenance.StatusActive && st.CurrentHost != "" {
+		sessionSuffix = "/" + st.CurrentHost
 	}
 
 	nodeList := &corev1.NodeList{}
 	if err := remoteClient.List(ctx, nodeList); err != nil {
 		return err
 	}
+	var patchErrs []error
 	for i := range nodeList.Items {
 		n := &nodeList.Items[i]
 		_, want := deferNodes[n.Name]
+		if _, ok := deferProviderIDs[n.Spec.ProviderID]; ok && n.Spec.ProviderID != "" {
+			want = true
+		}
+		if sessionSuffix != "" && strings.HasSuffix(n.Spec.ProviderID, sessionSuffix) {
+			want = true
+		}
 		has := n.Labels != nil && n.Labels[lxdDeferRefreshLabel] == "true"
 		if want == has {
 			continue
@@ -701,8 +731,8 @@ func (r *MaasClusterReconciler) syncLXDDeferRefresh(ctx context.Context, namespa
 			delete(n.Labels, lxdDeferRefreshLabel)
 		}
 		if err := remoteClient.Patch(ctx, n, client.MergeFrom(orig)); err != nil {
-			r.Log.Error(err, "failed to patch defer-refresh label", "node", n.Name)
+			patchErrs = append(patchErrs, fmt.Errorf("node %s: %w", n.Name, err))
 		}
 	}
-	return nil
+	return kerrors.NewAggregate(patchErrs)
 }

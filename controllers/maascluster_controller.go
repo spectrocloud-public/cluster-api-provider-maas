@@ -451,9 +451,16 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 			// With autoRefresh off the DaemonSet is gone and nothing clears a blocked
 			// label, so a stale one must not hold LXDReady at False.
 			policy := lxdPolicyFor(maasCluster)
-			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items); policy.AutoRefresh && len(blocked) > 0 {
+			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items, lxdStoreBlockedStatus); policy.AutoRefresh && len(blocked) > 0 {
 				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDRefreshBlockedReason, clusterv1.ConditionSeverityWarning,
-					"LXD refresh on %s is waiting for an approved version (%s). Add it to cloud.maas.lxd.approvedVersions after validating it with MAAS.",
+					"LXD refresh on %s cannot reach the snap store (%s). Check snap store access and the proxy in containerd's http-proxy.conf on those hosts.",
+					strings.Join(blocked, ", "), detail)
+				clusterScope.Info("LXD refresh cannot reach the snap store; Palette reconcile is not blocked", "nodes", blocked, "detail", detail)
+				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+			}
+			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items, lxdBlockedStatus); policy.AutoRefresh && len(blocked) > 0 {
+				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDRefreshBlockedReason, clusterv1.ConditionSeverityWarning,
+					"LXD refresh on %s is waiting for an approved version (%s). Validate that version with MAAS, then add it to the cloud.maas.lxd.approvedVersions pack value.",
 					strings.Join(blocked, ", "), detail)
 				clusterScope.Info("LXD refresh waiting for an approved version; Palette reconcile is not blocked", "nodes", blocked, "detail", detail)
 				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
