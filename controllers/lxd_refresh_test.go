@@ -21,7 +21,7 @@ import (
 	"github.com/spectrocloud/cluster-api-provider-maas/pkg/maas/maintenance"
 )
 
-var defaultLXDPolicy = lxdVersionPolicy{AutoRefresh: true, Target: lxdRecommendedVersion, RefreshBelow: lxdRecommendedVersion}
+var defaultLXDPolicy = lxdVersionPolicy{AutoRefresh: true, Target: lxdRecommendedVersion}
 
 func TestLXDVersionBelow(t *testing.T) {
 	g := NewGomegaWithT(t)
@@ -67,30 +67,29 @@ func TestLXDPolicyFor(t *testing.T) {
 		cluster       *infrav1beta1.MaasCluster
 		wantAuto      bool
 		wantTarget    string
-		wantBelow     string
 		wantRevisions string
 		wantError     string
 	}{
 		{name: "default is off with the recommended target", cluster: &infrav1beta1.MaasCluster{},
-			wantTarget: "5.0.10", wantBelow: "5.0.10", wantRevisions: "amd64=40911,arm64=40912"},
-		{name: "nil cluster uses defaults", cluster: nil, wantTarget: "5.0.10", wantBelow: "5.0.10", wantRevisions: "amd64=40911,arm64=40912"},
+			wantTarget: "5.0.10", wantRevisions: "amd64=40911,arm64=40912"},
+		{name: "nil cluster uses defaults", cluster: nil, wantTarget: "5.0.10", wantRevisions: "amd64=40911,arm64=40912"},
 		{name: "enabled without a target uses the recommended version", cluster: annotated(on),
-			wantAuto: true, wantTarget: "5.0.10", wantBelow: "5.0.10", wantRevisions: "amd64=40911,arm64=40912"},
+			wantAuto: true, wantTarget: "5.0.10", wantRevisions: "amd64=40911,arm64=40912"},
 		{name: "specific newer version with known revisions", cluster: annotated(onWith(" 5.0.11 ")),
-			wantAuto: true, wantTarget: "5.0.11", wantBelow: "5.0.11", wantRevisions: "amd64=41283,arm64=41286"},
+			wantAuto: true, wantTarget: "5.0.11", wantRevisions: "amd64=41283,arm64=41286"},
 		{name: "specific version without known revisions resolves from the channel", cluster: annotated(onWith("5.0.12")),
-			wantAuto: true, wantTarget: "5.0.12", wantBelow: "5.0.12"},
-		{name: "latest refreshes hosts below the recommended version", cluster: annotated(onWith("Latest")),
-			wantAuto: true, wantTarget: "latest", wantBelow: "5.0.10", wantRevisions: "amd64=40911,arm64=40912"},
+			wantAuto: true, wantTarget: "5.0.12"},
+		{name: "latest is not accepted", cluster: annotated(onWith("latest")),
+			wantTarget: "5.0.10", wantRevisions: "amd64=40911,arm64=40912", wantError: "not a version"},
 		{name: "specific version at the security minimum is allowed", cluster: annotated(onWith("5.0.7")),
-			wantAuto: true, wantTarget: "5.0.7", wantBelow: "5.0.7"},
+			wantAuto: true, wantTarget: "5.0.7"},
 		{name: "version below the security minimum turns the refresh off", cluster: annotated(onWith("5.0.6")),
-			wantTarget: "5.0.10", wantBelow: "5.0.10", wantRevisions: "amd64=40911,arm64=40912", wantError: "below 5.0.7"},
+			wantTarget: "5.0.10", wantRevisions: "amd64=40911,arm64=40912", wantError: "below 5.0.7"},
 		{name: "malformed version turns the refresh off", cluster: annotated(onWith("5.0.11;reboot")),
-			wantTarget: "5.0.10", wantBelow: "5.0.10", wantRevisions: "amd64=40911,arm64=40912", wantError: "not a version"},
+			wantTarget: "5.0.10", wantRevisions: "amd64=40911,arm64=40912", wantError: "not a version"},
 		{name: "spec wins over the annotation", cluster: withSpec(
 			infrav1beta1.LXDConfig{TargetVersion: "5.0.11"}, onWith("5.0.12"),
-		), wantAuto: true, wantTarget: "5.0.11", wantBelow: "5.0.11", wantRevisions: "amd64=41283,arm64=41286"},
+		), wantAuto: true, wantTarget: "5.0.11", wantRevisions: "amd64=41283,arm64=41286"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,7 +97,6 @@ func TestLXDPolicyFor(t *testing.T) {
 			p := lxdPolicyFor(tt.cluster)
 			g.Expect(p.AutoRefresh).To(Equal(tt.wantAuto))
 			g.Expect(p.Target).To(Equal(tt.wantTarget))
-			g.Expect(p.RefreshBelow).To(Equal(tt.wantBelow))
 			g.Expect(p.targetRevisions()).To(Equal(tt.wantRevisions))
 			if tt.wantError == "" {
 				g.Expect(p.TargetError).To(BeEmpty())
@@ -130,7 +128,7 @@ func TestNodeNeedsLXDWork(t *testing.T) {
 	optOut := defaultLXDPolicy
 	optOut.AutoRefresh = false
 	target511 := defaultLXDPolicy
-	target511.Target, target511.RefreshBelow = "5.0.11", "5.0.11"
+	target511.Target = "5.0.11"
 
 	tests := []struct {
 		name   string
@@ -194,7 +192,7 @@ func TestLXDRefreshSettled(t *testing.T) {
 	optOut := defaultLXDPolicy
 	optOut.AutoRefresh = false
 	target511 := defaultLXDPolicy
-	target511.Target, target511.RefreshBelow = "5.0.11", "5.0.11"
+	target511.Target = "5.0.11"
 
 	tests := []struct {
 		name   string

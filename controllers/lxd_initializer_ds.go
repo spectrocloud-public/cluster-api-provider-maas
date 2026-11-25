@@ -48,10 +48,6 @@ const (
 	// lxdRecommendedVersion is the 5.0 server version validated against MAAS 3.6/3.7
 	// as an in-place refresh target, including from 5.0.3 with VMs running.
 	lxdRecommendedVersion = "5.0.10"
-
-	// lxdLatestTarget installs what the channel offers, if it is at least the
-	// recommended version.
-	lxdLatestTarget = "latest"
 )
 
 // lxdKnownRevisions maps LXD server versions to their snap revision per architecture.
@@ -66,20 +62,18 @@ var lxdVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
 // lxdVersionPolicy decides whether a host is refreshed and what it is refreshed to.
 type lxdVersionPolicy struct {
 	AutoRefresh bool
-	// Target is a server version or lxdLatestTarget.
+	// Target is the server version installed on new hosts and refreshed hosts. A
+	// host below it is refreshed when AutoRefresh is true.
 	Target string
-	// RefreshBelow is the server version below which a host is refreshed: Target, or
-	// the recommended version when Target is lxdLatestTarget.
-	RefreshBelow string
 	// TargetError explains why the configured target was rejected. AutoRefresh is
 	// false when it is set.
 	TargetError string
 }
 
-// targetRevisions renders the known revisions of the version a refresh pins, as
-// "arch=revision" pairs, for the initializer script.
+// targetRevisions renders the known revisions of the target, as "arch=revision"
+// pairs, for the initializer script.
 func (p lxdVersionPolicy) targetRevisions() string {
-	revs := lxdKnownRevisions[p.RefreshBelow]
+	revs := lxdKnownRevisions[p.Target]
 	pairs := make([]string, 0, len(revs))
 	for arch, rev := range revs {
 		pairs = append(pairs, arch+"="+rev)
@@ -478,10 +472,9 @@ func (r *MaasClusterReconciler) renderDaemonSetForCluster(clusterScope *scope.Cl
 		"${TRUST_PASSWORD}":        tp,
 		"${NIC_TYPE}":              nt,
 		"${NIC_PARENT}":            np,
-		"${AUTO_REFRESH}":            auto,
-		"${LXD_TARGET_VERSION}":      policy.Target,
-		"${LXD_TARGET_REVISIONS}":    policy.targetRevisions(),
-		"${LXD_RECOMMENDED_VERSION}": lxdRecommendedVersion,
+		"${AUTO_REFRESH}":         auto,
+		"${LXD_TARGET_VERSION}":   policy.Target,
+		"${LXD_TARGET_REVISIONS}": policy.targetRevisions(),
 	}, lxdInitTemplate)
 
 	ds := &appsv1.DaemonSet{}
@@ -527,9 +520,8 @@ func nodeIsReady(n corev1.Node) bool {
 // rather than installing something the customer did not ask for.
 func lxdPolicyFor(cluster *infrav1beta1.MaasCluster) lxdVersionPolicy {
 	policy := lxdVersionPolicy{
-		AutoRefresh:  lxdAutoRefreshEnabled(cluster),
-		Target:       lxdRecommendedVersion,
-		RefreshBelow: lxdRecommendedVersion,
+		AutoRefresh: lxdAutoRefreshEnabled(cluster),
+		Target:      lxdRecommendedVersion,
 	}
 
 	target := ""
@@ -542,15 +534,12 @@ func lxdPolicyFor(cluster *infrav1beta1.MaasCluster) lxdVersionPolicy {
 
 	switch {
 	case target == "":
-	case strings.EqualFold(target, lxdLatestTarget):
-		policy.Target = lxdLatestTarget
 	case !lxdVersionPattern.MatchString(target):
-		policy.TargetError = fmt.Sprintf("targetVersion %q is not a version such as 5.0.11 or latest", target)
+		policy.TargetError = fmt.Sprintf("targetVersion %q is not a version such as 5.0.11", target)
 	case compareDotVersions(target, lxdMinServerVersion) < 0:
 		policy.TargetError = fmt.Sprintf("targetVersion %s is below %s, the first version with the CVE-2026-28384 fix", target, lxdMinServerVersion)
 	default:
 		policy.Target = target
-		policy.RefreshBelow = target
 	}
 	if policy.TargetError != "" {
 		policy.AutoRefresh = false
@@ -572,7 +561,7 @@ func nodeNeedsLXDWork(n corev1.Node, policy lxdVersionPolicy) bool {
 	if n.Labels[lxdDeferRefreshLabel] == "true" {
 		return true
 	}
-	return lxdVersionBelow(n.Labels[lxdVersionLabel], policy.RefreshBelow)
+	return lxdVersionBelow(n.Labels[lxdVersionLabel], policy.Target)
 }
 
 // lxdRefreshSettled is true when the DaemonSet can be removed.
@@ -590,7 +579,7 @@ func lxdRefreshSettled(nodes []corev1.Node, policy lxdVersionPolicy) bool {
 		if strings.HasPrefix(n.Labels[lxdUpgradeStatusLabel], "failed") || n.Labels[lxdDeferRefreshLabel] == "true" {
 			return false
 		}
-		if lxdVersionBelow(n.Labels[lxdVersionLabel], policy.RefreshBelow) {
+		if lxdVersionBelow(n.Labels[lxdVersionLabel], policy.Target) {
 			return false
 		}
 	}

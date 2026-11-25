@@ -84,9 +84,9 @@ type LXDConfig struct {
 	AutoRefresh *bool `json:"autoRefresh,omitempty"`
 
 	// TargetVersion is the LXD server version a refresh or a new host installs, such as "5.0.11".
-	// Empty uses the version CAPMAAS recommends. "latest" installs what the 5.0/stable
-	// channel offers when that is at least the recommended version. Versions below
-	// 5.0.7 are rejected, and a host is never downgraded.
+	// Empty uses the version CAPMAAS recommends. A version CAPMAAS has no revision for
+	// is installed only while the 5.0/stable channel offers exactly that version.
+	// Versions below 5.0.7 are rejected, and a host is never downgraded.
 	// +optional
 	TargetVersion string `json:"targetVersion,omitempty"`
 

@@ -460,8 +460,8 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 			}
 			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items, lxdBlockedStatus); policy.AutoRefresh && len(blocked) > 0 {
 				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDRefreshBlockedReason, clusterv1.ConditionSeverityWarning,
-					"LXD refresh on %s cannot resolve its target (%s). Set cloud.maas.lxd.targetVersion to a version 5.0/stable offers, or to latest.",
-					strings.Join(blocked, ", "), detail)
+					"LXD refresh on %s cannot resolve its target (%s). Set cloud.maas.lxd.targetVersion to a version CAPMAAS knows or 5.0/stable offers, or unset it to use %s.",
+					strings.Join(blocked, ", "), detail, lxdRecommendedVersion)
 				clusterScope.Info("LXD refresh cannot resolve its target; Palette reconcile is not blocked", "nodes", blocked, "detail", detail)
 				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
 			}

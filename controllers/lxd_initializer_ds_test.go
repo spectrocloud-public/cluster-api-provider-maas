@@ -37,8 +37,8 @@ func TestEnsureLXDScript(t *testing.T) {
 		{name: "refresh is off unless enabled", fragment: "AUTO_REFRESH=\"${AUTO_REFRESH:-false}\"", want: true},
 		{name: "recommended refresh target", fragment: "LXD_TARGET_VERSION:-5.0.10", want: true},
 		{name: "pins the target by its revision for this architecture", fragment: "rev=\"$(known_revision || true)\"", want: true},
-		{name: "latest never goes below the recommended version", fragment: "version_ge \"${chan_version}\" \"${LXD_RECOMMENDED_VERSION}\"", want: true},
-		{name: "refreshes only hosts older than the target", fragment: "version_ge \"${CUR}\" \"${REFRESH_BELOW}\"", want: true},
+		{name: "takes an unknown version from the channel only on an exact match", fragment: "[[ \"${chan_version}\" != \"${LXD_TARGET_VERSION}\" ]]", want: true},
+		{name: "refreshes only hosts older than the target", fragment: "version_ge \"${CUR}\" \"${LXD_TARGET_VERSION}\"", want: true},
 		{name: "records the version when autoRefresh is off", fragment: "if [[ -n \"${CUR}\" ]]; then label_version \"${CUR}\"; fi", want: true},
 		{name: "reads the refresh target from the channel", fragment: "snap info lxd", want: true},
 		{name: "retries a failed store read before the long wait", fragment: "(attempt ${attempt}/4)", want: true},
@@ -100,13 +100,13 @@ func TestRenderDaemonSetLXDRefreshEnv(t *testing.T) {
 		want    map[string]string
 	}{
 		{name: "default is off with the recommended pinned target", cluster: cluster(nil), want: map[string]string{
-			"AUTO_REFRESH": "false", "LXD_TARGET_VERSION": "5.0.10", "LXD_TARGET_REVISIONS": "amd64=40911,arm64=40912", "LXD_RECOMMENDED_VERSION": "5.0.10",
+			"AUTO_REFRESH": "false", "LXD_TARGET_VERSION": "5.0.10", "LXD_TARGET_REVISIONS": "amd64=40911,arm64=40912",
 		}},
 		{name: "customer target pins its own revisions", cluster: cluster(map[string]string{lxdAutoRefreshAnnotation: "true", lxdTargetAnnotation: "5.0.11"}), want: map[string]string{
 			"AUTO_REFRESH": "true", "LXD_TARGET_VERSION": "5.0.11", "LXD_TARGET_REVISIONS": "amd64=41283,arm64=41286",
 		}},
-		{name: "latest keeps the recommended revisions as the fallback", cluster: cluster(map[string]string{lxdAutoRefreshAnnotation: "true", lxdTargetAnnotation: "latest"}), want: map[string]string{
-			"AUTO_REFRESH": "true", "LXD_TARGET_VERSION": "latest", "LXD_TARGET_REVISIONS": "amd64=40911,arm64=40912",
+		{name: "unknown version leaves revisions empty for the channel match", cluster: cluster(map[string]string{lxdAutoRefreshAnnotation: "true", lxdTargetAnnotation: "5.0.13"}), want: map[string]string{
+			"AUTO_REFRESH": "true", "LXD_TARGET_VERSION": "5.0.13", "LXD_TARGET_REVISIONS": "",
 		}},
 		{name: "invalid target is rendered with the refresh off", cluster: cluster(map[string]string{lxdAutoRefreshAnnotation: "true", lxdTargetAnnotation: "5.0.3"}), want: map[string]string{
 			"AUTO_REFRESH": "false", "LXD_TARGET_VERSION": "5.0.10",
