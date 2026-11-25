@@ -57,7 +57,8 @@ var lxdKnownRevisions = map[string]map[string]string{
 	"5.0.11": {"amd64": "41283", "arm64": "41286"},
 }
 
-var lxdVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
+// lxdTargetPattern accepts only 5.0 patch releases: hosts track the 5.0/stable channel.
+var lxdTargetPattern = regexp.MustCompile(`^5\.0\.[0-9]+$`)
 
 // lxdVersionPolicy decides whether a host is refreshed and what it is refreshed to.
 type lxdVersionPolicy struct {
@@ -534,8 +535,8 @@ func lxdPolicyFor(cluster *infrav1beta1.MaasCluster) lxdVersionPolicy {
 
 	switch {
 	case target == "":
-	case !lxdVersionPattern.MatchString(target):
-		policy.TargetError = fmt.Sprintf("targetVersion %q is not a version such as 5.0.11", target)
+	case !lxdTargetPattern.MatchString(target):
+		policy.TargetError = fmt.Sprintf("targetVersion %q is not a 5.0 release such as 5.0.11", target)
 	case compareDotVersions(target, lxdMinServerVersion) < 0:
 		policy.TargetError = fmt.Sprintf("targetVersion %s is below %s, the first version with the CVE-2026-28384 fix", target, lxdMinServerVersion)
 	default:
