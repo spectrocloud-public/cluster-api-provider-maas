@@ -119,17 +119,29 @@ func (s *Service) GetMachine(systemID string) (*infrav1beta1.Machine, error) {
 	return machine, nil
 }
 
-func (s *Service) ReleaseMachine(systemID string) error {
+func (s *Service) ReleaseMachine(systemID string, eraseMode infrav1beta1.EraseMode) error {
 	ctx := context.TODO()
 
-	// WithErase requests a full disk wipe on release so leftover data (e.g. rook-ceph
-	// OSD signatures, prior OS install) does not block reuse on the next cluster deploy.
-	// Without secure_erase/quick_erase, MAAS overwrites the whole disk with null bytes.
-	_, err := s.maasClient.Machines().
+	// MAAS wipe-disks erases every writable disk the host can see, including SAN
+	// LUNs that are still mapped, so erase is requested only when the MaasCluster
+	// sets it. A region with enable_disk_erasing_on_release=true can still erase
+	// on its own.
+	releaser := s.maasClient.Machines().
 		Machine(systemID).
-		Releaser().
-		WithErase().
-		Release(ctx)
+		Releaser()
+	switch eraseMode {
+	case infrav1beta1.EraseModeNone, "":
+	case infrav1beta1.EraseModeFull:
+		releaser = releaser.WithErase()
+	case infrav1beta1.EraseModeQuick:
+		releaser = releaser.WithErase().WithQuickErase()
+	case infrav1beta1.EraseModeSecure:
+		releaser = releaser.WithErase().WithSecureErase()
+	default:
+		return errors.Errorf("unsupported erase mode %q", eraseMode)
+	}
+	s.scope.Info("Releasing MAAS machine", "systemID", systemID, "eraseMode", eraseMode)
+	_, err := releaser.Release(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to release machine")
 	}

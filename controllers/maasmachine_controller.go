@@ -64,6 +64,10 @@ type MaasMachineReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Tracker  clustercache.ClusterCache
+
+	// evacuationState deduplicates the "waiting for HMC" log: one line per
+	// distinct HostEvacuationReady state, not one every 10s.
+	evacuationState evacuationStateTracker
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=maasmachines,verbs=get;list;watch;create;update;patch;delete
@@ -80,6 +84,7 @@ func (r *MaasMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	err := r.Get(ctx, req.NamespacedName, maasMachine)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
+			r.evacuationState.forget(req.Namespace + "/" + req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -175,6 +180,12 @@ func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope 
 
 	maasMachine := machineScope.MaasMachine
 
+	// Nothing left to report once the finalizer is gone; drop the log state so
+	// a deleted host does not stay in the tracker for the process lifetime.
+	if !controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
+		r.evacuationState.forget(evacuationStateKey(maasMachine))
+	}
+
 	// Check if the host evacuation finalizer is present - if so, requeue for HMC controller
 	if controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
 		// Evacuation requires the MAAS systemID; if it's missing, there's nothing to evacuate.
@@ -182,12 +193,25 @@ func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope 
 		if !hasSystemID {
 			machineScope.Info("No systemID/providerID; removing evacuation finalizer to unblock deletion")
 			controllerutil.RemoveFinalizer(maasMachine, HostEvacuationFinalizer)
+			r.evacuationState.forget(evacuationStateKey(maasMachine))
 			return ctrl.Result{}, nil
 		}
 
-		// Log using Spec.SystemID directly to avoid providerID parse errors
-		machineScope.Info("Host evacuation finalizer present, requeuing for HMC controller to handle evacuation",
-			"systemID", *maasMachine.Spec.SystemID)
+		// One line per distinct evacuation state, not one every 10s. HMC writes
+		// HostEvacuationReady; when it is absent, HMC has not reported yet.
+		reason := conditions.GetReason(maasMachine, infrav1beta1.HostEvacuationReadyCondition)
+		if reason == "" {
+			reason = "WaitingForHMC"
+		}
+		detail := conditions.GetMessage(maasMachine, infrav1beta1.HostEvacuationReadyCondition)
+		key := evacuationStateKey(maasMachine)
+		if r.evacuationState.changed(key, reason+"|"+detail) {
+			machineScope.Info("Host evacuation pending",
+				"systemID", *maasMachine.Spec.SystemID, "reason", reason, "detail", detail)
+		} else {
+			machineScope.V(2).Info("Host evacuation pending (unchanged)",
+				"systemID", *maasMachine.Spec.SystemID, "reason", reason)
+		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
@@ -231,7 +255,11 @@ func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope 
 		r.bestEffortUnregisterLXDHost(clusterScope, machineScope, m)
 	}
 
-	if err := r.tryReleaseWithVMHostHandling(context.Background(), machineScope, clusterScope, machineSvc, m); err != nil {
+	eraseMode := infrav1beta1.EraseModeNone
+	if clusterScope != nil && clusterScope.MaasCluster != nil {
+		eraseMode = clusterScope.MaasCluster.Spec.EraseDisksOnRelease
+	}
+	if err := r.tryReleaseWithVMHostHandling(context.Background(), machineScope, clusterScope, machineSvc, m, eraseMode); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -281,8 +309,8 @@ func canonicalLXDHostName(hostname string) string {
 }
 
 // tryReleaseWithVMHostHandling releases the machine, handling VM host dependencies when required
-func (r *MaasMachineReconciler) tryReleaseWithVMHostHandling(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope, machineSvc *maasmachine.Service, m *infrav1beta1.Machine) error {
-	if err := machineSvc.ReleaseMachine(m.ID); err != nil {
+func (r *MaasMachineReconciler) tryReleaseWithVMHostHandling(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope, machineSvc *maasmachine.Service, m *infrav1beta1.Machine, eraseMode infrav1beta1.EraseMode) error {
+	if err := machineSvc.ReleaseMachine(m.ID, eraseMode); err != nil {
 		// If MAAS requires VM host removal first, attempt best-effort unregister and retry once
 		if isVMHostRemovalRequiredError(err) {
 			api := clusterScope.GetMaasClientIdentity()
@@ -303,7 +331,7 @@ func (r *MaasMachineReconciler) tryReleaseWithVMHostHandling(ctx context.Context
 			}
 			machineScope.Info("Unregistered LXD VM host prior to release", "hostName", hostName)
 			// retry release
-			if rerr := machineSvc.ReleaseMachine(m.ID); rerr != nil {
+			if rerr := machineSvc.ReleaseMachine(m.ID, eraseMode); rerr != nil {
 				machineScope.Error(rerr, "failed to release machine after unregistering VM host")
 				return rerr
 			}
@@ -380,6 +408,40 @@ func (r *MaasMachineReconciler) findMachine(machineScope *scope.MachineScope, ma
 	return m, nil
 }
 
+// evacuationCompleted reports whether HMC has already evacuated the host backing this
+// MaasMachine. HMC writes the annotation after a successful evacuation and skips such
+// machines from then on.
+func evacuationCompleted(maasMachine *infrav1beta1.MaasMachine) bool {
+	return maasMachine != nil && maasMachine.Annotations[EvacuationCompletedAnnotation] != ""
+}
+
+// shouldAddEvacuationFinalizer reports whether the proactive host evacuation finalizer must be
+// ensured on this MaasMachine.
+//
+// The finalizer exists so a host cannot be released before its VMs are evacuated. The machine
+// controller adds it before deletion, and HMC removes it after a successful evacuation. Once
+// HMC has recorded completion with EvacuationCompletedAnnotation, the finalizer must not be
+// re-added: HMC will not run another evacuation for a completed host, so a re-added finalizer
+// would have no remover while the machine controller only requeues. A host with no completion
+// record still gets the finalizer, including during the drain window, so a machine that missed
+// the proactive add is still protected.
+func shouldAddEvacuationFinalizer(maasMachine *infrav1beta1.MaasMachine, clusterScope *scope.ClusterScope) bool {
+	if maasMachine == nil || clusterScope == nil || clusterScope.MaasCluster == nil {
+		return false
+	}
+	if !clusterScope.IsLXDHostEnabled() {
+		return false
+	}
+	isHostMachine := maasMachine.Spec.Parent == nil || *maasMachine.Spec.Parent == ""
+	if !isHostMachine {
+		return false
+	}
+	if controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
+		return false
+	}
+	return !evacuationCompleted(maasMachine)
+}
+
 func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScope *scope.MachineScope, clusterScope *scope.ClusterScope) (ctrl.Result, error) {
 	machineScope.Info("Reconciling MaasMachine")
 
@@ -391,16 +453,18 @@ func (r *MaasMachineReconciler) reconcileNormal(ctx context.Context, machineScop
 		return ctrl.Result{}, nil
 	}
 
-	// For host machines in HCP clusters (where LXD is enabled), proactively add the evacuation finalizer
-	// This ensures VMs are evacuated before the host is deleted
-	// This must be done BEFORE the machine starts being deleted, otherwise Kubernetes
-	// will reject the finalizer addition with "no new finalizers can be added if the object is being deleted"
+	// For host machines in HCP clusters (where LXD is enabled), proactively add the evacuation
+	// finalizer so VMs are evacuated before the host is deleted. A host machine without the
+	// finalizer returns here either way. The add is suppressed only after HMC has recorded a
+	// completed evacuation; see shouldAddEvacuationFinalizer.
 	isHostMachine := maasMachine.Spec.Parent == nil || *maasMachine.Spec.Parent == ""
 	isHCPCluster := clusterScope.IsLXDHostEnabled()
 
 	if isHostMachine && isHCPCluster && !controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
-		machineScope.Info("Adding evacuation finalizer to host machine in HCP cluster")
-		controllerutil.AddFinalizer(maasMachine, HostEvacuationFinalizer)
+		if shouldAddEvacuationFinalizer(maasMachine, clusterScope) {
+			machineScope.Info("Adding evacuation finalizer to host machine in HCP cluster")
+			controllerutil.AddFinalizer(maasMachine, HostEvacuationFinalizer)
+		}
 		return ctrl.Result{}, nil
 	}
 

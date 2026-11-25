@@ -13,7 +13,7 @@ RELEASE_DIR := _build/release
 DEV_DIR := _build/dev
 REPO_ROOT := $(shell git rev-parse --show-toplevel)
 FIPS_ENABLE ?= ""
-BUILDER_GOLANG_VERSION ?= 1.26.9
+BUILDER_GOLANG_VERSION ?= 1.26.11
 BUILD_ARGS = --build-arg CRYPTO_LIB=${FIPS_ENABLE} --build-arg BUILDER_GOLANG_VERSION=${BUILDER_GOLANG_VERSION}
 ARCH ?= amd64
 ALL_ARCH = amd64 arm64
@@ -26,7 +26,7 @@ endif
 # Image URL to use all building/pushing image targets
 IMAGE_NAME := cluster-api-provider-maas-controller
 REGISTRY ?= "us-east1-docker.pkg.dev/spectro-images/dev/${USER}/cluster-api"
-SPECTRO_VERSION ?= latest
+SPECTRO_VERSION ?= storage-overcommit-prevention-20260506
 IMG_TAG ?= v0.9.0-fork-spectro-${SPECTRO_VERSION}
 CONTROLLER_IMG ?= ${REGISTRY}/${IMAGE_NAME}
 
