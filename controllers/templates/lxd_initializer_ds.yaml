@@ -27,7 +27,7 @@ spec:
         effect: "NoSchedule"
       initContainers:
       - name: ensure-lxd
-        # Pinned Ubuntu version: 22.04.3 (tested and verified)
+        # Init container image only needs bash + nsenter; unrelated to the host OS.
         # Using custom registry to avoid Docker Hub rate limits
         image: us-docker.pkg.dev/palette-images/third-party/ubuntu:22.04
         imagePullPolicy: IfNotPresent
@@ -36,50 +36,33 @@ spec:
         - -c
         - |
           set -ex
-          # Check on the HOST, not in the container
-          if ! nsenter -t 1 -m -p -- bash -lc 'command -v lxd >/dev/null 2>&1'; then
-            echo "LXD not present on host, installing snapd and LXD on host";
-            # Pin snapd version to avoid unexpected updates
-            # Version 2.60+ is required for LXD 5.0 support
-            # Using specific version to ensure consistency across deployments
-            nsenter -t 1 -m -p -- bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y snapd=2.60.*'
+          # LXD 5.0 is the series verified against our MAAS servers. Install from the
+          # channel, never a pinned revision: snap revisions are per-architecture, so a
+          # single number is not installable everywhere (PCP-7159 reports the old pin,
+          # 38113, as unavailable on amd64) and it silently rots as the series moves.
+          LXD_CHANNEL=5.0/stable
+          # Probe the snap binary on the HOST, not `command -v lxd`. This is the one check
+          # that has to hold on both supported hosts:
+          #   22.04 - nothing named lxd on PATH, so the old check installed correctly
+          #   24.04 - ships the lxd-installer deb, whose stub at /usr/sbin/lxd made the
+          #           old check succeed with no LXD actually installed
+          # /snap/bin/lxd is what every later command uses, so testing for it is accurate
+          # on both. Uses bash's builtin test so it does not depend on host coreutils.
+          if ! nsenter -t 1 -m -p -- bash -lc 'test -x /snap/bin/lxd'; then
+            echo "Snap LXD not present on host, installing snapd and LXD ${LXD_CHANNEL} on host";
+            # snapd ships with Ubuntu server images, so only install when genuinely
+            # missing - and unpinned, because an exact pin (e.g. 2.60.*) does not exist
+            # on every release.
+            nsenter -t 1 -m -p -- bash -lc 'command -v snap >/dev/null 2>&1 || { export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y snapd; }'
             # Enable and start snapd on the host
             nsenter -t 1 -m -p -- systemctl enable --now snapd.socket
-            # Install LXD 5.0.5 (hardcoded - revision 38113)
-            echo "Installing LXD 5.0.5 (revision 38113)"
-            nsenter -t 1 -m -p -- snap install lxd --revision=38113 || {
-              echo "ERROR: Failed to install LXD revision 38113 (5.0.5)"
+            nsenter -t 1 -m -p -- snap install lxd --channel="${LXD_CHANNEL}" || {
+              echo "ERROR: Failed to install LXD from channel ${LXD_CHANNEL}"
               exit 1
             }
-            
-            # Verify both LXD and LXC are 5.0.5
-            LXD_VERSION=$(nsenter -t 1 -m -p -- /snap/bin/lxd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-            LXC_CLIENT=$(nsenter -t 1 -m -p -- /snap/bin/lxc version 2>&1 | grep "Client version:" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-            LXC_SERVER=$(nsenter -t 1 -m -p -- /snap/bin/lxc version 2>&1 | grep "Server version:" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-            
-            echo "LXD version: ${LXD_VERSION}, LXC client: ${LXC_CLIENT}, LXC server: ${LXC_SERVER}"
-            
-            if [ "${LXD_VERSION}" != "5.0.5" ] || [ "${LXC_CLIENT}" != "5.0.5" ] || [ "${LXC_SERVER}" != "5.0.5" ]; then
-              echo "ERROR: Version mismatch! Expected 5.0.5, got LXD:${LXD_VERSION} LXC-client:${LXC_CLIENT} LXC-server:${LXC_SERVER}"
-              exit 1
-            fi
-            
-            # Hold snap to prevent updates
-            nsenter -t 1 -m -p -- snap refresh --hold lxd
-          else
-            # Verify existing installation is 5.0.5
-            LXD_VERSION=$(nsenter -t 1 -m -p -- /snap/bin/lxd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-            LXC_CLIENT=$(nsenter -t 1 -m -p -- /snap/bin/lxc version 2>&1 | grep "Client version:" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-            LXC_SERVER=$(nsenter -t 1 -m -p -- /snap/bin/lxc version 2>&1 | grep "Server version:" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-            echo "LXD version: ${LXD_VERSION}, LXC client: ${LXC_CLIENT}, LXC server: ${LXC_SERVER}"
-            
-            if [ "${LXD_VERSION}" != "5.0.5" ] || [ "${LXC_CLIENT}" != "5.0.5" ] || [ "${LXC_SERVER}" != "5.0.5" ]; then
-              echo "WARNING: Existing installation is not 5.0.5"
-            fi
-            
-            # Ensure snap is held
-            nsenter -t 1 -m -p -- snap refresh --hold lxd || true
           fi
+          # Hold snap to prevent updates off the verified series
+          nsenter -t 1 -m -p -- snap refresh --hold lxd || true
           echo "Ensuring LXD daemon is running on host";
           # Start/enable via snap (avoid systemd invocation from the pod)
           nsenter -t 1 -m -p -- snap start --enable lxd.daemon || true
@@ -88,9 +71,21 @@ spec:
           if ! nsenter -t 1 -m -p -- /snap/bin/lxd waitready --timeout 300 ; then
             echo "LXD did not become ready after 5 minutes"; exit 1;
           fi
-          # Final version verification
-          FINAL_VERSION=$(nsenter -t 1 -m -p -- /snap/bin/lxd --version 2>&1 || echo "unknown")
-          echo "Host LXD is ready, version: ${FINAL_VERSION}";
+          # Verify the series only after waitready - `lxc version` cannot report a
+          # server version until the daemon is up.
+          LXD_VERSION=$(nsenter -t 1 -m -p -- /snap/bin/lxd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+          LXC_CLIENT=$(nsenter -t 1 -m -p -- /snap/bin/lxc version 2>&1 | grep "Client version:" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+          LXC_SERVER=$(nsenter -t 1 -m -p -- /snap/bin/lxc version 2>&1 | grep "Server version:" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+          echo "Host LXD is ready - LXD version: ${LXD_VERSION}, LXC client: ${LXC_CLIENT}, LXC server: ${LXC_SERVER}";
+          # Warn, don't exit - waitready already proved LXD works, and a host that came
+          # up on another 5.x should not start crashlooping. A real incompatibility
+          # surfaces in the lxd-initializer container at MAAS registration.
+          for v in "${LXD_VERSION}" "${LXC_CLIENT}" "${LXC_SERVER}"; do
+            case "${v}" in
+              5.0.*) ;;
+              *) echo "WARNING: expected LXD 5.0.x, got LXD:${LXD_VERSION} LXC-client:${LXC_CLIENT} LXC-server:${LXC_SERVER}"; break ;;
+            esac
+          done
         securityContext:
           privileged: true
         volumeMounts:
