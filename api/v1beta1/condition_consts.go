@@ -98,4 +98,14 @@ const (
 
 	// LXDSetupPendingReason documents LXD host setup in progress
 	LXDSetupPendingReason = "LXDSetupPending"
+
+	// LXDRefreshBlockedReason documents a refresh that cannot resolve or reach its target LXD version
+	LXDRefreshBlockedReason = "LXDRefreshBlocked"
+
+	// LXDBelowSecurityMinimumReason documents LXD hosts below, or not known to be at,
+	// the minimum version with the CVE-2026-28384 fix while autoRefresh is off
+	LXDBelowSecurityMinimumReason = "LXDBelowSecurityMinimum"
+
+	// LXDInvalidTargetVersionReason documents a targetVersion that CAPMAAS will not install
+	LXDInvalidTargetVersionReason = "LXDInvalidTargetVersion"
 )

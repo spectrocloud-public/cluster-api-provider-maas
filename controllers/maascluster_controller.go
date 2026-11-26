@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -335,6 +336,15 @@ func addressInPreferredSubnets(log logr.Logger, preferredSubnets []string, addre
 	return false
 }
 
+const (
+	// lxdRefreshActiveRequeue tracks a refresh that is moving host by host.
+	lxdRefreshActiveRequeue = time.Minute
+	// lxdRefreshWaitingRequeue applies while a refresh waits on a person (a failed
+	// host to investigate, or a version to approve). An approval edits the
+	// MaasCluster, which reconciles immediately anyway.
+	lxdRefreshWaitingRequeue = 10 * time.Minute
+)
+
 func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope *scope.ClusterScope) (ctrl.Result, error) {
 	clusterScope.Info("Reconciling MaasCluster")
 
@@ -430,6 +440,58 @@ func (r *MaasClusterReconciler) reconcileNormal(_ context.Context, clusterScope 
 			conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError, "%s", err.Error())
 			return reconcile.Result{}, err
 		}
+		targetNodes := &corev1.NodeList{}
+		if err := remoteClient.List(context.Background(), targetNodes); err == nil {
+			if failed := lxdRefreshFailedNodeNames(targetNodes.Items); len(failed) > 0 {
+				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDFailedReason, clusterv1.ConditionSeverityError,
+					"LXD refresh failed on %s. Clear lxdhost.cluster.com/upgrade-status on that node after investigation.", strings.Join(failed, ", "))
+				clusterScope.Info("LXD refresh failed; Palette reconcile is not blocked", "nodes", failed)
+				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+			}
+			// With autoRefresh off the DaemonSet is gone and nothing clears a blocked
+			// label, so a stale one must not hold LXDReady at False for that reason.
+			policy := lxdPolicyFor(maasCluster)
+			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items, lxdStoreBlockedStatus); policy.AutoRefresh && len(blocked) > 0 {
+				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDRefreshBlockedReason, clusterv1.ConditionSeverityWarning,
+					"LXD refresh on %s cannot reach the snap store (%s). Check snap store access and the proxy in containerd's http-proxy.conf on those hosts.",
+					strings.Join(blocked, ", "), detail)
+				clusterScope.Info("LXD refresh cannot reach the snap store; Palette reconcile is not blocked", "nodes", blocked, "detail", detail)
+				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+			}
+			if blocked, detail := lxdRefreshBlockedNodes(targetNodes.Items, lxdBlockedStatus); policy.AutoRefresh && len(blocked) > 0 {
+				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDRefreshBlockedReason, clusterv1.ConditionSeverityWarning,
+					"LXD refresh on %s cannot resolve its target (%s). Set cloud.maas.lxd.targetVersion to a version CAPMAAS knows or 5.0/stable offers, or unset it to use %s.",
+					strings.Join(blocked, ", "), detail, lxdRecommendedVersion)
+				clusterScope.Info("LXD refresh cannot resolve its target; Palette reconcile is not blocked", "nodes", blocked, "detail", detail)
+				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+			}
+			if policy.AutoRefresh && !lxdRefreshSettled(targetNodes.Items, policy) {
+				return ctrl.Result{RequeueAfter: lxdRefreshActiveRequeue}, nil
+			}
+			// Warnings only: nothing below changes a host, and LXDReady is not part of
+			// the cluster's Ready summary.
+			if policy.TargetError != "" {
+				conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDInvalidTargetVersionReason, clusterv1.ConditionSeverityWarning,
+					"LXD refresh is off: %s.", policy.TargetError)
+				clusterScope.Info("LXD targetVersion rejected; not refreshing", "reason", policy.TargetError)
+				return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+			}
+			if !policy.AutoRefresh {
+				below, unknown := lxdHostsBelowSecurityMinimum(targetNodes.Items)
+				if len(below) > 0 {
+					conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDBelowSecurityMinimumReason, clusterv1.ConditionSeverityWarning,
+						"LXD on %s is below %s and exposed to CVE-2026-28384. Set cloud.maas.lxd.autoRefresh to true to refresh it to %s.",
+						strings.Join(below, ", "), lxdMinServerVersion, policy.Target)
+					return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+				}
+				if len(unknown) > 0 {
+					conditions.MarkFalse(maasCluster, infrav1beta1.LXDReadyCondition, infrav1beta1.LXDBelowSecurityMinimumReason, clusterv1.ConditionSeverityWarning,
+						"LXD version is not recorded on %s, so it may be below %s (CVE-2026-28384). Set cloud.maas.lxd.autoRefresh to true to check these hosts and refresh any older than %s.",
+						strings.Join(unknown, ", "), lxdMinServerVersion, policy.Target)
+					return ctrl.Result{RequeueAfter: lxdRefreshWaitingRequeue}, nil
+				}
+			}
+		}
 		conditions.MarkTrue(maasCluster, infrav1beta1.LXDReadyCondition)
 		clusterScope.Info("LXD hosts are available")
 	}
@@ -449,7 +511,8 @@ func (r *MaasClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.GenericEventChannel = make(chan event.GenericEvent)
 	}
 
-	c, err := ctrl.NewControllerManagedBy(mgr).
+	clusterToMaasCluster := util.ClusterToInfrastructureMapFunc(context.Background(), infrav1beta1.GroupVersion.WithKind("MaasCluster"), mgr.GetClient(), &infrav1beta1.MaasCluster{})
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.MaasCluster{}).
 		WithOptions(controller.Options{
 			RecoverPanic: &recover,
@@ -460,11 +523,16 @@ func (r *MaasClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Watches(
 			&clusterv1.Cluster{},
-			handler.EnqueueRequestsFromMapFunc(
-				util.ClusterToInfrastructureMapFunc(context.Background(), infrav1beta1.GroupVersion.WithKind("MaasCluster"), mgr.GetClient(), &infrav1beta1.MaasCluster{}),
-			),
+			handler.EnqueueRequestsFromMapFunc(clusterToMaasCluster),
 			//predicates.ClusterUnpaused(mgr.GetScheme(), r.Log),
-		).
+		)
+	// An already initialized cluster gets no other event when the cluster cache
+	// connects (e.g. after a controller restart), and reconcileNormal stops before
+	// the LXD step while the workload API is unreachable.
+	if r.Tracker != nil {
+		b = b.WatchesRawSource(r.Tracker.GetClusterSource("maascluster", clusterToMaasCluster))
+	}
+	c, err := b.
 		WithEventFilter(predicates.ResourceNotPaused(mgr.GetScheme(), r.Log)).
 		Build(r)
 	if err != nil {
