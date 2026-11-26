@@ -36,6 +36,16 @@ const (
 	TagVMReadyOpPrefix = "maas-lxd-ready-op-"
 )
 
+// IsVMClusterTag reports whether tag is an owning WLC cluster tag,
+// maas-lxd-wlc-<clusterID>. The shared prefix also matches the reserved CP
+// and worker role tags, so those are excluded.
+func IsVMClusterTag(tag string) bool {
+	if !strings.HasPrefix(tag, TagVMClusterPrefix) {
+		return false
+	}
+	return tag != TagVMControlPlane && tag != TagVMClusterPrefix+"worker"
+}
+
 // BuildOpTag builds the session opId tag for hosts.
 func BuildOpTag(opID string) string { return TagHostOpPrefix + opID }
 

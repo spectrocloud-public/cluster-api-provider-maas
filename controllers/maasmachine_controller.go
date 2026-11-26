@@ -64,6 +64,10 @@ type MaasMachineReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Tracker  clustercache.ClusterCache
+
+	// evacuationState deduplicates the "waiting for HMC" log: one line per
+	// distinct HostEvacuationReady state, not one every 10s.
+	evacuationState evacuationStateTracker
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=maasmachines,verbs=get;list;watch;create;update;patch;delete
@@ -80,6 +84,7 @@ func (r *MaasMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	err := r.Get(ctx, req.NamespacedName, maasMachine)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
+			r.evacuationState.forget(req.Namespace + "/" + req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -175,6 +180,12 @@ func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope 
 
 	maasMachine := machineScope.MaasMachine
 
+	// Nothing left to report once the finalizer is gone; drop the log state so
+	// a deleted host does not stay in the tracker for the process lifetime.
+	if !controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
+		r.evacuationState.forget(evacuationStateKey(maasMachine))
+	}
+
 	// Check if the host evacuation finalizer is present - if so, requeue for HMC controller
 	if controllerutil.ContainsFinalizer(maasMachine, HostEvacuationFinalizer) {
 		// Evacuation requires the MAAS systemID; if it's missing, there's nothing to evacuate.
@@ -182,12 +193,25 @@ func (r *MaasMachineReconciler) reconcileDelete(_ context.Context, machineScope 
 		if !hasSystemID {
 			machineScope.Info("No systemID/providerID; removing evacuation finalizer to unblock deletion")
 			controllerutil.RemoveFinalizer(maasMachine, HostEvacuationFinalizer)
+			r.evacuationState.forget(evacuationStateKey(maasMachine))
 			return ctrl.Result{}, nil
 		}
 
-		// Log using Spec.SystemID directly to avoid providerID parse errors
-		machineScope.Info("Host evacuation finalizer present, requeuing for HMC controller to handle evacuation",
-			"systemID", *maasMachine.Spec.SystemID)
+		// One line per distinct evacuation state, not one every 10s. HMC writes
+		// HostEvacuationReady; when it is absent, HMC has not reported yet.
+		reason := conditions.GetReason(maasMachine, infrav1beta1.HostEvacuationReadyCondition)
+		if reason == "" {
+			reason = "WaitingForHMC"
+		}
+		detail := conditions.GetMessage(maasMachine, infrav1beta1.HostEvacuationReadyCondition)
+		key := evacuationStateKey(maasMachine)
+		if r.evacuationState.changed(key, reason+"|"+detail) {
+			machineScope.Info("Host evacuation pending",
+				"systemID", *maasMachine.Spec.SystemID, "reason", reason, "detail", detail)
+		} else {
+			machineScope.V(2).Info("Host evacuation pending (unchanged)",
+				"systemID", *maasMachine.Spec.SystemID, "reason", reason)
+		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 

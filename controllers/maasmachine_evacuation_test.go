@@ -2,16 +2,19 @@ package controllers
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -223,7 +226,11 @@ func TestReconcileMaasMachineRemovesReAddedFinalizer(t *testing.T) {
 				Name:       owner.Name,
 			}}
 
-			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, maasMachine).Build()
+			k8sClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&infrav1beta1.MaasMachine{}).
+				WithObjects(owner, maasMachine).
+				Build()
 			var stored infrav1beta1.MaasMachine
 			g.Expect(k8sClient.Get(context.Background(), types.NamespacedName{
 				Name:      maasMachine.Name,
@@ -234,6 +241,144 @@ func TestReconcileMaasMachineRemovesReAddedFinalizer(t *testing.T) {
 			_, err := reconciler.reconcileMaasMachine(context.Background(), &stored)
 			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(controllerutil.ContainsFinalizer(&stored, HostEvacuationFinalizer)).To(Equal(tt.expectFinalizer))
+
+			var updated infrav1beta1.MaasMachine
+			g.Expect(k8sClient.Get(context.Background(), types.NamespacedName{
+				Name:      maasMachine.Name,
+				Namespace: namespace,
+			}, &updated)).To(Succeed())
+			cond := conditions.Get(&updated, infrav1beta1.HostEvacuationReadyCondition)
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Message).To(ContainSubstring(testEvacuationOpID))
+			g.Expect(strings.Contains(cond.Message, "opID=")).To(BeTrue())
 		})
 	}
+}
+
+func TestReconcileMaasMachineCompletedRebuildsBlockedCondition(t *testing.T) {
+	g := NewGomegaWithT(t)
+	scheme := runtime.NewScheme()
+	g.Expect(infrav1beta1.AddToScheme(scheme)).To(Succeed())
+	g.Expect(clusterv1.AddToScheme(scheme)).To(Succeed())
+	g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
+
+	now := metav1.NewTime(time.Now())
+	namespace := "cluster-test"
+	owner := &clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "host-machine",
+			Namespace:         namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"machine.cluster.x-k8s.io"},
+		},
+	}
+	maasMachine := testMaasMachine(nil, []string{infrav1beta1.MachineFinalizer}, map[string]string{
+		EvacuationCompletedAnnotation: testEvacuationOpID,
+	})
+	maasMachine.Name = "host-maasmachine"
+	maasMachine.Namespace = namespace
+	maasMachine.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: clusterv1.GroupVersion.String(),
+		Kind:       "Machine",
+		Name:       owner.Name,
+	}}
+	conditions.Set(maasMachine, &clusterv1.Condition{
+		Type:     infrav1beta1.HostEvacuationReadyCondition,
+		Status:   corev1.ConditionFalse,
+		Reason:   infrav1beta1.HostEvacuationVMsRemainingReason,
+		Severity: clusterv1.ConditionSeverityWarning,
+		Message:  "opID=old; 2 VM(s) remaining",
+	})
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1beta1.MaasMachine{}).
+		WithObjects(owner, maasMachine).
+		Build()
+	var stored infrav1beta1.MaasMachine
+	g.Expect(k8sClient.Get(context.Background(), types.NamespacedName{
+		Name:      maasMachine.Name,
+		Namespace: namespace,
+	}, &stored)).To(Succeed())
+
+	reconciler := &HMCMaintenanceReconciler{Client: k8sClient, Log: logr.Discard()}
+	_, err := reconciler.reconcileMaasMachine(context.Background(), &stored)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	var updated infrav1beta1.MaasMachine
+	g.Expect(k8sClient.Get(context.Background(), types.NamespacedName{
+		Name:      maasMachine.Name,
+		Namespace: namespace,
+	}, &updated)).To(Succeed())
+	cond := conditions.Get(&updated, infrav1beta1.HostEvacuationReadyCondition)
+	g.Expect(cond).ToNot(BeNil())
+	g.Expect(cond.Status).To(Equal(corev1.ConditionTrue))
+	g.Expect(cond.Reason).To(Equal(infrav1beta1.HostEvacuationCompleteReason))
+	g.Expect(cond.Message).ToNot(ContainSubstring("VM(s) remaining"))
+	g.Expect(cond.Message).To(ContainSubstring(testEvacuationOpID))
+}
+
+// TestReconcileMaasMachineNoSystemIDSetsCheckFailed exercises HMC's real error
+// branch without a MAAS client: a deleting host MaasMachine with no systemID
+// must set HostEvacuationReady=False/EvacuationCheckFailed and keep the
+// evacuation finalizer.
+func TestReconcileMaasMachineNoSystemIDSetsCheckFailed(t *testing.T) {
+	g := NewGomegaWithT(t)
+	scheme := runtime.NewScheme()
+	g.Expect(infrav1beta1.AddToScheme(scheme)).To(Succeed())
+	g.Expect(clusterv1.AddToScheme(scheme)).To(Succeed())
+	g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
+
+	now := metav1.NewTime(time.Now())
+	namespace := "cluster-test"
+	owner := &clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "host-machine",
+			Namespace:         namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"machine.cluster.x-k8s.io"},
+		},
+	}
+	maasMachine := testMaasMachine(nil, []string{
+		infrav1beta1.MachineFinalizer,
+		HostEvacuationFinalizer,
+	}, nil)
+	maasMachine.Name = "host-maasmachine"
+	maasMachine.Namespace = namespace
+	maasMachine.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion:         clusterv1.GroupVersion.String(),
+		Kind:               "Machine",
+		Name:               owner.Name,
+		Controller:         ptr.To(true),
+		BlockOwnerDeletion: ptr.To(true),
+	}}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1beta1.MaasMachine{}).
+		WithObjects(owner, maasMachine).
+		Build()
+	var stored infrav1beta1.MaasMachine
+	g.Expect(k8sClient.Get(context.Background(), types.NamespacedName{
+		Name:      maasMachine.Name,
+		Namespace: namespace,
+	}, &stored)).To(Succeed())
+
+	reconciler := &HMCMaintenanceReconciler{Client: k8sClient, Log: logr.Discard()}
+	_, err := reconciler.reconcileMaasMachine(context.Background(), &stored)
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("no systemID"))
+
+	var updated infrav1beta1.MaasMachine
+	g.Expect(k8sClient.Get(context.Background(), types.NamespacedName{
+		Name:      maasMachine.Name,
+		Namespace: namespace,
+	}, &updated)).To(Succeed())
+	cond := conditions.Get(&updated, infrav1beta1.HostEvacuationReadyCondition)
+	g.Expect(cond).ToNot(BeNil())
+	g.Expect(cond.Status).To(Equal(corev1.ConditionFalse))
+	g.Expect(cond.Reason).To(Equal(infrav1beta1.HostEvacuationCheckFailedReason))
+	g.Expect(cond.Severity).To(Equal(clusterv1.ConditionSeverityWarning))
+	g.Expect(cond.Message).To(ContainSubstring("maasMachine has no systemID"))
+	g.Expect(controllerutil.ContainsFinalizer(&updated, HostEvacuationFinalizer)).To(BeTrue())
 }
