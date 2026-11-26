@@ -86,6 +86,12 @@ spec:
               lxdConfig:
                 description: LXDConfig contains the configuration for LXD hosts
                 properties:
+                  autoRefresh:
+                    description: |-
+                      AutoRefresh refreshes an installed LXD snap that is older than TargetVersion,
+                      one host at a time. Nil or false leaves installed snaps unchanged; a host
+                      without the snap still gets TargetVersion installed.
+                    type: boolean
                   enabled:
                     default: false
                     description: Enabled specifies whether to enable LXD VM support
@@ -122,6 +128,13 @@ spec:
                     default: "50"
                     description: StorageSize specifies the size of the storage pool
                       in GB
+                    type: string
+                  targetVersion:
+                    description: |-
+                      TargetVersion is the LXD server version a refresh or a new host installs, such as "5.0.11".
+                      Empty uses the version CAPMAAS recommends. A version CAPMAAS has no revision for
+                      is installed only while the 5.0/stable channel offers exactly that version.
+                      Versions below 5.0.7 are rejected, and a host is never downgraded.
                     type: string
                   zone:
                     description: Zone specifies the MAAS availability zone to register
